@@ -1,0 +1,6 @@
+[submodule "pykirk"]
+	path = pykirk
+	url = https://git.mers.csail.mit.edu/enterprise/pykirk
+[submodule "enterprise"]
+	path = enterprise
+	url = https://git.mers.csail.mit.edu/enterprise/enterprise
