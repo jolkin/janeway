@@ -6,15 +6,18 @@ planning server, and dispatches it through the pykirk dispatcher.
 """
 
 import asyncio
+import importlib
 import json
 import logging
 import os
 import subprocess
 import sys
+import tempfile
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 logging.basicConfig(
@@ -31,6 +34,11 @@ ORACLE_PORT = int(os.environ.get("LOCAL_ORACLE_PORT", "9002"))
 
 KIRK_BINARY = os.environ.get("KIRK_BINARY", "/app/kirk/kirk")
 PYKIRK_DIR = os.environ.get("PYKIRK_DIR", "/app/pykirk")
+PDDL_TO_SP_DIR = os.environ.get("PDDL_TO_SP_DIR", "/app/pddl_to_sp")
+
+# Make pddl_to_sp importable (uses bare imports internally).
+if PDDL_TO_SP_DIR not in sys.path:
+    sys.path.insert(0, PDDL_TO_SP_DIR)
 
 _processes: list[subprocess.Popen] = []
 
@@ -208,6 +216,113 @@ async def execute(request: Request):
         )
 
     log.info("Plan dispatched successfully")
+    return JSONResponse(
+        status_code=202,
+        content={"status": "dispatched", "detail": dispatch_resp.json()},
+    )
+
+
+@app.post("/execute-pddl")
+async def execute_pddl(
+    domain: UploadFile = File(..., description="PDDL domain file"),
+    problem: UploadFile = File(..., description="PDDL problem file"),
+    plan: str = Form(..., description="Temporal PDDL plan (e.g. '0.0: action(args) [dur]' lines)"),
+):
+    """
+    Accept a PDDL domain, problem, and temporal plan; convert to a state plan
+    via pddl_to_sp; plan it through Kirk; and dispatch via PyKirk.
+
+    Form fields:
+      domain  – PDDL domain file upload
+      problem – PDDL problem file upload
+      plan    – temporal plan as plain text (form field)
+    """
+    domain_text = (await domain.read()).decode("utf-8")
+    problem_text = (await problem.read()).decode("utf-8")
+
+    # ── Step 1: Convert PDDL → state plan JSON via pddl_to_sp ────────────────
+    log.info("Converting PDDL inputs to state plan JSON")
+    try:
+        # pddl_to_sp functions expect file paths, so write to temp files.
+        with (
+            tempfile.NamedTemporaryFile(mode="w", suffix=".pddl", delete=False) as df,
+            tempfile.NamedTemporaryFile(mode="w", suffix=".pddl", delete=False) as pf,
+        ):
+            df.write(domain_text)
+            pf.write(problem_text)
+            domain_path = df.name
+            problem_path = pf.name
+
+        from json_skeleton import create_initial_json
+        from populate import (
+            populate_state_space,
+            populate_constraints,
+            populate_goal_episodes,
+            populate_value_episodes,
+        )
+        import io_utils
+
+        state_plan = create_initial_json()
+        action_counts = populate_state_space(state_plan, plan, domain_path, problem_path)
+        populate_constraints(state_plan, plan, domain_path, problem_path, action_counts)
+        populate_goal_episodes(state_plan, plan, domain_path, problem_path, action_counts)
+        populate_value_episodes(state_plan, plan, domain_path, problem_path, action_counts)
+        state_plan_json = json.dumps(state_plan)
+        print("Generated state plan JSON:", state_plan_json)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"PDDL conversion error: {exc}")
+    finally:
+        for p in (domain_path, problem_path):
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
+
+    # ── Step 2: Send state plan to Kirk for planning ──────────────────────────
+    log.info("Sending state plan to kirk for planning")
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            resp = await client.post(
+                f"http://127.0.0.1:{KIRK_SERVE_PORT}/plan-from-state-plan",
+                content=state_plan_json.encode(),
+                headers={"Content-Type": "application/json"},
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"Kirk planning server unreachable: {exc}")
+
+    if resp.status_code == 422:
+        raise HTTPException(status_code=422, detail="No feasible plan found for the given state plan")
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Kirk planning server error ({resp.status_code}): {resp.text}",
+        )
+
+    try:
+        plan_payload = resp.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Kirk returned non-JSON response")
+
+    log.info("Plan received from kirk, dispatching to pykirk")
+
+    # ── Step 3: Dispatch plan via pykirk dispatcher ───────────────────────────
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            dispatch_resp = await client.post(
+                f"http://127.0.0.1:{DISPATCHER_PORT}/plans",
+                json=plan_payload,
+                headers={"Content-Type": "application/json"},
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"PyKirk dispatcher unreachable: {exc}")
+
+    if dispatch_resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"PyKirk dispatcher error ({dispatch_resp.status_code}): {dispatch_resp.text}",
+        )
+
+    log.info("PDDL plan dispatched successfully")
     return JSONResponse(
         status_code=202,
         content={"status": "dispatched", "detail": dispatch_resp.json()},

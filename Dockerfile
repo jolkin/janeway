@@ -73,6 +73,7 @@ RUN sbcl --non-interactive \
 # ── Build the kirk binary ──────────────────────────────────────────────────────
 RUN sbcl --non-interactive \
          --eval "(require :asdf)" \
+         --eval "(declaim (sb-ext:muffle-conditions style-warning))" \
          --eval "(asdf:make :kirk-v2)" \
     && ls -lh /common-lisp/enterprise/build/kirk*
 
@@ -110,6 +111,9 @@ COPY --from=kirk-builder /common-lisp/enterprise/build/ /app/kirk/
 # ── Install the wrapper server's own dependencies ─────────────────────────────
 RUN pip install --no-cache-dir fastapi "uvicorn[standard]" httpx
 
+# ── Copy pddl_to_sp converter ─────────────────────────────────────────────────
+COPY pddl_to_sp/ /app/pddl_to_sp/
+
 # ── Copy application files ────────────────────────────────────────────────────
 COPY server.py /app/server.py
 COPY start.sh  /app/start.sh
@@ -122,6 +126,7 @@ EXPOSE 8000
 
 ENV KIRK_BINARY=/app/kirk/kirk \
     PYKIRK_DIR=/app/pykirk \
+    PDDL_TO_SP_DIR=/app/pddl_to_sp \
     KIRK_PORT=7000 \
     DISPATCHER_PORT=9000 \
     LOCAL_AGENT_PORT=9001 \
