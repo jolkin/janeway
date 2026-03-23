@@ -35,6 +35,12 @@ ORACLE_PORT = int(os.environ.get("LOCAL_ORACLE_PORT", "9002"))
 KIRK_BINARY = os.environ.get("KIRK_BINARY", "/app/kirk/kirk")
 PYKIRK_DIR = os.environ.get("PYKIRK_DIR", "/app/pykirk")
 PDDL_TO_SP_DIR = os.environ.get("PDDL_TO_SP_DIR", "/app/pddl_to_sp")
+ENABLE_VIS = os.environ.get("ENABLE_VIS", "0").strip() not in ("0", "", "false", "False")
+TELEMETRY_PORT = int(os.environ.get("TELEMETRY_PORT", "8002"))
+VIS_PORT = int(os.environ.get("VIS_PORT", "5173"))
+# Public WebSocket URL used by the browser to reach the telemetry server.
+# Must be reachable from the client machine, not from inside the container.
+VIS_WS_URL = os.environ.get("VIS_WS_URL", f"ws://localhost:{TELEMETRY_PORT}/ws")
 
 # Make pddl_to_sp importable (uses bare imports internally).
 if PDDL_TO_SP_DIR not in sys.path:
@@ -89,7 +95,7 @@ async def lifespan(app: FastAPI):
         "DISPATCHER_PORT": str(DISPATCHER_PORT),
         "LOCAL_AGENT_PORT": str(AGENT_PORT),
         "LOCAL_ORACLE_PORT": str(ORACLE_PORT),
-        "TELEMETRY_PORT": "8002",
+        "TELEMETRY_PORT": str(TELEMETRY_PORT),
     }
 
     for uvicorn_app, port, name in [
@@ -105,6 +111,26 @@ async def lifespan(app: FastAPI):
             name=name,
         )
 
+    # ── Visualization services (optional) ──────────────────────────────────
+    if ENABLE_VIS:
+        log.info("Visualization enabled — starting telemetry and Vite dev server")
+        _start_process(
+            ["uv", "run", "uvicorn",
+             "src.pykirk.dispatch.api.telemetry.main:app",
+             "--host", "0.0.0.0", "--port", str(TELEMETRY_PORT)],
+            cwd=PYKIRK_DIR,
+            env={**pykirk_env, "PORT": str(TELEMETRY_PORT)},
+            name="telemetry",
+        )
+        _start_process(
+            ["npm", "run", "dev", "--",
+             "--host", "0.0.0.0",
+             "--port", str(VIS_PORT)],
+            cwd=f"{PYKIRK_DIR}/visualization",
+            env={**base_env, "VITE_TELEMETRY_WS_URL": VIS_WS_URL},
+            name="visualization",
+        )
+
     # ── Wait for all services to be ready ──────────────────────────────────
     log.info("Waiting for services to become ready...")
     checks = [
@@ -113,6 +139,11 @@ async def lifespan(app: FastAPI):
         (f"http://127.0.0.1:{AGENT_PORT}/docs", "local-agent"),
         (f"http://127.0.0.1:{ORACLE_PORT}/docs", "local-oracle"),
     ]
+    if ENABLE_VIS:
+        checks += [
+            (f"http://127.0.0.1:{TELEMETRY_PORT}/docs", "telemetry"),
+            (f"http://127.0.0.1:{VIS_PORT}/", "visualization"),
+        ]
     for url, name in checks:
         ready = await wait_for_http(url, timeout=120.0)
         if ready:
@@ -332,14 +363,21 @@ async def execute_pddl(
 @app.get("/health")
 async def health():
     """Check liveness of this server and its downstream services."""
+    checks = [
+        (f"http://127.0.0.1:{KIRK_SERVE_PORT}/health", "kirk"),
+        (f"http://127.0.0.1:{DISPATCHER_PORT}/docs", "dispatcher"),
+        (f"http://127.0.0.1:{AGENT_PORT}/docs", "agent"),
+        (f"http://127.0.0.1:{ORACLE_PORT}/docs", "oracle"),
+    ]
+    if ENABLE_VIS:
+        checks += [
+            (f"http://127.0.0.1:{TELEMETRY_PORT}/docs", "telemetry"),
+            (f"http://127.0.0.1:{VIS_PORT}/", "visualization"),
+        ]
+
     results = {}
     async with httpx.AsyncClient(timeout=3.0) as client:
-        for url, name in [
-            (f"http://127.0.0.1:{KIRK_SERVE_PORT}/health", "kirk"),
-            (f"http://127.0.0.1:{DISPATCHER_PORT}/docs", "dispatcher"),
-            (f"http://127.0.0.1:{AGENT_PORT}/docs", "agent"),
-            (f"http://127.0.0.1:{ORACLE_PORT}/docs", "oracle"),
-        ]:
+        for url, name in checks:
             try:
                 r = await client.get(url)
                 results[name] = "ok" if r.status_code < 500 else "degraded"

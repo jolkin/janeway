@@ -56,11 +56,12 @@ The image uses a two-stage build.
 
 **Stage 2 (`runtime`)** builds the Python runtime:
 
-1. Installs `uv` and the `pykirk` package from source.
+1. Installs `uv`, Node.js 20 (for the optional visualization), and the `pykirk` package from source.
 2. Copies the compiled Kirk binary bundle from stage 1.
 3. Copies the `pddl_to_sp` converter module.
-4. Installs the FastAPI wrapper dependencies.
-5. Sets the entrypoint to `start.sh`, which launches `uvicorn server:app`.
+4. Pre-installs visualization npm dependencies (`npm install` in `pykirk/visualization/`).
+5. Installs the FastAPI wrapper dependencies.
+6. Sets the entrypoint to `start.sh`, which launches `uvicorn server:app`.
 
 ```bash
 # Build (from the repo root)
@@ -75,6 +76,33 @@ docker run --rm -p 8000:8000 eaas
 
 The server is ready when you see all four internal services report as ready in the logs.
 
+### Visualization
+
+Pass `ENABLE_VIS=1` to also start the telemetry server and the Vite visualization frontend. Both the telemetry port (default `8002`) and the Vite port (default `5173`) must be exposed. Because the visualization runs in the browser, `VIS_WS_URL` must be the WebSocket address that **the browser** can reach — adjust it to match whatever hostname/IP you expose the container on.
+
+```bash
+# Visualization on localhost (default)
+docker run --rm \
+  -p 8000:8000 \
+  -p 8002:8002 \
+  -p 5173:5173 \
+  -e ENABLE_VIS=1 \
+  eaas
+```
+
+Open `http://localhost:5173` in a browser once the container is ready.
+
+```bash
+# Remote host or custom ports
+docker run --rm \
+  -p 8000:8000 \
+  -p 8002:8002 \
+  -p 5173:5173 \
+  -e ENABLE_VIS=1 \
+  -e VIS_WS_URL=ws://192.168.1.10:8002/ws \
+  eaas
+```
+
 ### Environment variables
 
 | Variable            | Default | Description                         |
@@ -87,6 +115,10 @@ The server is ready when you see all four internal services report as ready in t
 | `LOCAL_AGENT_PORT`  | `9001`  | Internal port for the local agent   |
 | `LOCAL_ORACLE_PORT` | `9002`  | Internal port for the local oracle  |
 | `SERVER_PORT`       | `8000`  | External port for the HTTP API      |
+| `ENABLE_VIS`        | `0`     | Set to `1` to enable visualization  |
+| `TELEMETRY_PORT`    | `8002`  | Port for the PyKirk telemetry server (vis only) |
+| `VIS_PORT`          | `5173`  | Port for the Vite visualization frontend (vis only) |
+| `VIS_WS_URL`        | `ws://localhost:8002/ws` | WebSocket URL the **browser** uses to reach the telemetry server. Must be publicly reachable. |
 
 ## API
 
@@ -157,8 +189,89 @@ curl http://localhost:8000/health
 # {"status": "ok", "services": {"kirk": "ok", "dispatcher": "ok", "agent": "ok", "oracle": "ok"}}
 ```
 
+## ROS 2 Bridge
+
+The [ros_bridge/](ros_bridge/) package is a standalone ROS 2 node that runs **outside** the Docker container and connects the EaaS dispatch loop to a ROS 2 system.
+
+**Outbound** (container → ROS): the node connects to the telemetry WebSocket inside the container and publishes every dispatch event on the `/eaas/events` ROS topic as a `std_msgs/String` containing JSON.
+
+**Inbound** (ROS → container): the node subscribes to `/eaas/execution_reports`. When a message arrives it is forwarded as an HTTP POST to the dispatcher's `/handle_execution` endpoint so the dispatch cycle can advance based on real-world acknowledgements instead of the simulated oracle.
+
+### Installation
+
+The bridge requires a sourced ROS 2 workspace (Humble or later) with `rclpy` and `std_msgs`.
+
+```bash
+# From your ROS 2 workspace src/ directory
+ln -s /path/to/execution-as-a-service/ros_bridge .
+cd ..
+pip install websockets aiohttp   # Python deps for the bridge
+colcon build --packages-select ros_bridge
+source install/setup.bash
+```
+
+### Usage
+
+```bash
+# Default — connects to localhost:8002 (telemetry) and localhost:9000 (dispatcher)
+ros2 run ros_bridge bridge_node
+
+# Custom URLs
+ros2 run ros_bridge bridge_node --ros-args \
+  -p telemetry_ws_url:=ws://192.168.1.10:8002/ws \
+  -p dispatcher_url:=http://192.168.1.10:9000
+
+# Or via launch file
+ros2 launch ros_bridge bridge.launch.py \
+  telemetry_ws_url:=ws://192.168.1.10:8002/ws
+```
+
+### Parameters
+
+| Parameter           | Default                    | Description                              |
+|---------------------|----------------------------|------------------------------------------|
+| `telemetry_ws_url`  | `ws://localhost:8002/ws`   | Telemetry WebSocket URL (inside the EaaS container) |
+| `dispatcher_url`    | `http://localhost:9000`    | Dispatcher HTTP URL (inside the EaaS container)     |
+| `event_topic`       | `/eaas/events`             | ROS topic for outbound dispatch events   |
+| `report_topic`      | `/eaas/execution_reports`  | ROS topic for inbound execution reports  |
+| `reconnect_delay`   | `3.0`                      | Seconds to wait before reconnecting after a WS drop |
+
+### Sending execution reports from ROS
+
+Publish a `std_msgs/String` to `/eaas/execution_reports` with a JSON body:
+
+```json
+{
+  "event": "drive_1_end",
+  "execution_time": 12.5,
+  "is_controllable": true
+}
+```
+
+The bridge will POST this to the dispatcher's `POST /handle_execution` as a `ReportExecutionPayloadDTO`.
+
+### Listening for dispatch events
+
+Subscribe to `/eaas/events`. Each message is a JSON string with the telemetry event format:
+
+```json
+{
+  "type": "execution",
+  "timestamp": "2026-03-23T14:30:00.000",
+  "source": "agent",
+  "data": {
+    "agent_id": "agent_0",
+    "event": "drive_1_start",
+    "verb": "drive",
+    "time": 4.0,
+    "controllable": true
+  }
+}
+```
+
 ## Submodules
 
 - [enterprise/](enterprise/) — Common Lisp source for Kirk. The planner is built from `enterprise/kirk-v2/`.
 - [pykirk/](pykirk/) — Python dispatch layer. See `pykirk/scripts/demo.sh` for a standalone usage example.
 - [pddl_to_sp/](pddl_to_sp/) — Python module that converts a PDDL domain, problem, and temporal plan into a state plan JSON compatible with Kirk's `POST /plan-from-state-plan` endpoint.
+- [ros_bridge/](ros_bridge/) — ROS 2 bridge node. Relays dispatch events to ROS topics and execution reports back to the dispatcher.
