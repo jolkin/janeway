@@ -136,7 +136,7 @@ class EaaSBridgeNode(Node):
 
     async def _post_execution(self, report: dict):
         """POST an execution report to the dispatcher."""
-        url = f"{self._dispatcher_url}/handle_execution"
+        url = f"{self._dispatcher_url}/executions"
         payload = {
             "executions": [
                 {

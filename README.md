@@ -103,6 +103,23 @@ docker run --rm \
   eaas
 ```
 
+### External execution (no oracle)
+
+By default the container runs a local oracle that simulates execution acknowledgements. When integrating with a real robot system (e.g. via the ROS 2 bridge), disable the oracle so that execution reports come from outside the container:
+
+```bash
+docker run --rm \
+  -p 8000:8000 \
+  -p 9000:9000 \
+  -e ENABLE_ORACLE=0 \
+  eaas
+```
+
+When `ENABLE_ORACLE=0`:
+- The local oracle service is **not started**.
+- The dispatcher binds to `0.0.0.0` instead of `127.0.0.1`, making its `POST /handle_execution` endpoint reachable from outside the container.
+- You must publish port `9000` (or your custom `DISPATCHER_PORT`) so external systems can send execution reports.
+
 ### Environment variables
 
 | Variable            | Default | Description                         |
@@ -111,10 +128,11 @@ docker run --rm \
 | `PYKIRK_DIR`        | `/app/pykirk`       | Path to the pykirk source tree  |
 | `PDDL_TO_SP_DIR`    | `/app/pddl_to_sp`   | Path to the pddl_to_sp module   |
 | `KIRK_PORT`         | `7000`  | Internal port for `kirk serve`      |
-| `DISPATCHER_PORT`   | `9000`  | Internal port for the dispatcher    |
+| `DISPATCHER_PORT`   | `9000`  | Port for the dispatcher (exposed when oracle is disabled) |
 | `LOCAL_AGENT_PORT`  | `9001`  | Internal port for the local agent   |
 | `LOCAL_ORACLE_PORT` | `9002`  | Internal port for the local oracle  |
 | `SERVER_PORT`       | `8000`  | External port for the HTTP API      |
+| `ENABLE_ORACLE`     | `1`     | Set to `0` to disable the local oracle and expose the dispatcher for external execution reports |
 | `ENABLE_VIS`        | `0`     | Set to `1` to enable visualization  |
 | `TELEMETRY_PORT`    | `8002`  | Port for the PyKirk telemetry server (vis only) |
 | `VIS_PORT`          | `5173`  | Port for the Vite visualization frontend (vis only) |

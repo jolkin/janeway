@@ -35,6 +35,9 @@ ORACLE_PORT = int(os.environ.get("LOCAL_ORACLE_PORT", "9002"))
 KIRK_BINARY = os.environ.get("KIRK_BINARY", "/app/kirk/kirk")
 PYKIRK_DIR = os.environ.get("PYKIRK_DIR", "/app/pykirk")
 PDDL_TO_SP_DIR = os.environ.get("PDDL_TO_SP_DIR", "/app/pddl_to_sp")
+ROBUST_EXEC_DIR = os.environ.get("ROBUST_EXEC_DIR", "/app/robust-execution")
+MONITOR_PORT = int(os.environ.get("MONITOR_PORT", "9003"))
+ENABLE_ORACLE = os.environ.get("ENABLE_ORACLE", "1").strip() not in ("0", "", "false", "False")
 ENABLE_VIS = os.environ.get("ENABLE_VIS", "0").strip() not in ("0", "", "false", "False")
 TELEMETRY_PORT = int(os.environ.get("TELEMETRY_PORT", "8002"))
 VIS_PORT = int(os.environ.get("VIS_PORT", "5173"))
@@ -96,24 +99,55 @@ async def lifespan(app: FastAPI):
         "LOCAL_AGENT_PORT": str(AGENT_PORT),
         "LOCAL_ORACLE_PORT": str(ORACLE_PORT),
         "TELEMETRY_PORT": str(TELEMETRY_PORT),
+        "ENVIRONMENT": "dev" if ENABLE_ORACLE else "prod",
     }
 
-    for uvicorn_app, port, name in [
-        ("src.pykirk.dispatch.api.dispatcher.main:app", DISPATCHER_PORT, "dispatcher"),
-        ("src.pykirk.dispatch.api.local.agent.main:app", AGENT_PORT, "local-agent"),
-        ("src.pykirk.dispatch.api.local.oracle.main:app", ORACLE_PORT, "local-oracle"),
-    ]:
+    # When the oracle is disabled, external systems (e.g. a ROS bridge) provide
+    # execution reports directly.  Bind the dispatcher to 0.0.0.0 so it is
+    # reachable from outside the container.
+    dispatcher_host = "127.0.0.1" if ENABLE_ORACLE else "0.0.0.0"
+
+    services = [
+        ("src.pykirk.dispatch.api.dispatcher.main:app", DISPATCHER_PORT, dispatcher_host, "dispatcher"),
+        ("src.pykirk.dispatch.api.local.agent.main:app", AGENT_PORT, "127.0.0.1", "local-agent"),
+    ]
+    if ENABLE_ORACLE:
+        services.append(
+            ("src.pykirk.dispatch.api.local.oracle.main:app", ORACLE_PORT, "127.0.0.1", "local-oracle"),
+        )
+    else:
+        log.info("Oracle disabled — dispatcher bound to 0.0.0.0:%s for external execution reports", DISPATCHER_PORT)
+
+    for uvicorn_app, port, host, name in services:
         _start_process(
             ["uv", "run", "uvicorn", uvicorn_app,
-             "--host", "127.0.0.1", "--port", str(port)],
+             "--host", host, "--port", str(port)],
             cwd=PYKIRK_DIR,
             env={**pykirk_env, "PORT": str(port)},
             name=name,
         )
 
-    # ── Visualization services (optional) ──────────────────────────────────
-    if ENABLE_VIS:
-        log.info("Visualization enabled — starting telemetry and Vite dev server")
+    # ── Causal link monitor server ─────────────────────────────────────────
+    _start_process(
+        ["uv", "run", "uvicorn",
+         "planexecutive.monitor.server.server:app",
+         "--host", "127.0.0.1", "--port", str(MONITOR_PORT)],
+        cwd=ROBUST_EXEC_DIR,
+        env={**base_env, "PORT": str(MONITOR_PORT)},
+        name="monitor",
+    )
+
+    # ── Telemetry server ──────────────────────────────────────────────────
+    # Start the telemetry server when visualization is enabled OR when the
+    # oracle is disabled (the ROS bridge needs the telemetry WebSocket to
+    # receive dispatch events).
+    if ENABLE_VIS or not ENABLE_ORACLE:
+        reason = []
+        if ENABLE_VIS:
+            reason.append("visualization enabled")
+        if not ENABLE_ORACLE:
+            reason.append("oracle disabled (ROS bridge needs telemetry WS)")
+        log.info("Starting telemetry server — %s", ", ".join(reason))
         _start_process(
             ["uv", "run", "uvicorn",
              "src.pykirk.dispatch.api.telemetry.main:app",
@@ -122,6 +156,10 @@ async def lifespan(app: FastAPI):
             env={**pykirk_env, "PORT": str(TELEMETRY_PORT)},
             name="telemetry",
         )
+
+    # ── Visualization frontend (optional) ────────────────────────────────
+    if ENABLE_VIS:
+        log.info("Visualization enabled — starting Vite dev server")
         _start_process(
             ["npm", "run", "dev", "--",
              "--host", "0.0.0.0",
@@ -137,13 +175,14 @@ async def lifespan(app: FastAPI):
         (f"http://127.0.0.1:{KIRK_SERVE_PORT}/health", "kirk-serve"),
         (f"http://127.0.0.1:{DISPATCHER_PORT}/docs", "dispatcher"),
         (f"http://127.0.0.1:{AGENT_PORT}/docs", "local-agent"),
-        (f"http://127.0.0.1:{ORACLE_PORT}/docs", "local-oracle"),
+        (f"http://127.0.0.1:{MONITOR_PORT}/docs", "monitor"),
     ]
+    if ENABLE_ORACLE:
+        checks.append((f"http://127.0.0.1:{ORACLE_PORT}/docs", "local-oracle"))
+    if ENABLE_VIS or not ENABLE_ORACLE:
+        checks.append((f"http://127.0.0.1:{TELEMETRY_PORT}/docs", "telemetry"))
     if ENABLE_VIS:
-        checks += [
-            (f"http://127.0.0.1:{TELEMETRY_PORT}/docs", "telemetry"),
-            (f"http://127.0.0.1:{VIS_PORT}/", "visualization"),
-        ]
+        checks.append((f"http://127.0.0.1:{VIS_PORT}/", "visualization"))
     for url, name in checks:
         ready = await wait_for_http(url, timeout=120.0)
         if ready:
@@ -161,6 +200,24 @@ async def lifespan(app: FastAPI):
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+async def _initialize_monitor(plan_payload: dict):
+    """Send the plan to the causal link monitor for initialization."""
+    log.info("Initializing causal link monitor with plan")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"http://127.0.0.1:{MONITOR_PORT}/initialize-state-plan",
+                json=plan_payload,
+                headers={"Content-Type": "application/json"},
+            )
+        if resp.status_code == 200:
+            log.info("Causal link monitor initialized successfully")
+        else:
+            log.warning("Monitor initialization returned %s: %s", resp.status_code, resp.text)
+    except httpx.RequestError as exc:
+        log.warning("Could not reach causal link monitor: %s", exc)
 
 
 app = FastAPI(
@@ -227,9 +284,12 @@ async def execute(request: Request):
     except Exception:
         raise HTTPException(status_code=502, detail="Kirk returned non-JSON response")
 
-    log.info("Plan received from kirk-serve, dispatching to pykirk")
+    log.info("Plan received from kirk-serve")
 
-    # ── Step 2: Dispatch plan via pykirk dispatcher ───────────────────────
+    # ── Step 2: Initialize causal link monitor ─────────────────────────────
+    await _initialize_monitor(plan_payload)
+
+    # ── Step 3: Dispatch plan via pykirk dispatcher ───────────────────────
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             dispatch_resp = await client.post(
@@ -334,9 +394,12 @@ async def execute_pddl(
     except Exception:
         raise HTTPException(status_code=502, detail="Kirk returned non-JSON response")
 
-    log.info("Plan received from kirk, dispatching to pykirk")
+    log.info("Plan received from kirk")
 
-    # ── Step 3: Dispatch plan via pykirk dispatcher ───────────────────────────
+    # ── Step 3: Initialize causal link monitor ────────────────────────────────
+    await _initialize_monitor(plan_payload)
+
+    # ── Step 4: Dispatch plan via pykirk dispatcher ───────────────────────────
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             dispatch_resp = await client.post(
@@ -367,13 +430,14 @@ async def health():
         (f"http://127.0.0.1:{KIRK_SERVE_PORT}/health", "kirk"),
         (f"http://127.0.0.1:{DISPATCHER_PORT}/docs", "dispatcher"),
         (f"http://127.0.0.1:{AGENT_PORT}/docs", "agent"),
-        (f"http://127.0.0.1:{ORACLE_PORT}/docs", "oracle"),
+        (f"http://127.0.0.1:{MONITOR_PORT}/docs", "monitor"),
     ]
+    if ENABLE_ORACLE:
+        checks.append((f"http://127.0.0.1:{ORACLE_PORT}/docs", "oracle"))
+    if ENABLE_VIS or not ENABLE_ORACLE:
+        checks.append((f"http://127.0.0.1:{TELEMETRY_PORT}/docs", "telemetry"))
     if ENABLE_VIS:
-        checks += [
-            (f"http://127.0.0.1:{TELEMETRY_PORT}/docs", "telemetry"),
-            (f"http://127.0.0.1:{VIS_PORT}/", "visualization"),
-        ]
+        checks.append((f"http://127.0.0.1:{VIS_PORT}/", "visualization"))
 
     results = {}
     async with httpx.AsyncClient(timeout=3.0) as client:
