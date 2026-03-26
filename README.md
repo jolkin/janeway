@@ -44,7 +44,21 @@ On container startup, `server.py` launches all four internal services and waits 
 
 ## Building
 
-The image uses a two-stage build.
+This project uses git submodules. After cloning the repository, run the following command to initialize submodules:
+
+```bash
+# Initialize submodules:
+git submodule update --init 
+```
+
+To build the image run the following line:
+
+```bash
+# Build (from the repo root)
+docker build -t eaas .
+```
+
+This triggers a two-stage build.
 
 **Stage 1 (`kirk-builder`)** compiles the Kirk binary from Common Lisp source:
 
@@ -62,11 +76,6 @@ The image uses a two-stage build.
 4. Pre-installs visualization npm dependencies (`npm install` in `pykirk/visualization/`).
 5. Installs the FastAPI wrapper dependencies.
 6. Sets the entrypoint to `start.sh`, which launches `uvicorn server:app`.
-
-```bash
-# Build (from the repo root)
-docker build -t eaas .
-```
 
 ## Running
 
@@ -156,6 +165,7 @@ Submit an RMPL program for planning and execution.
 ```bash
 curl -X POST http://localhost:8000/execute \
      -H "Content-Type: text/plain" \
+     -H "X-Package-Name: my-package-name" \
      --data-binary @my_program.rmpl
 ```
 

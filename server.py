@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -26,6 +27,9 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 log = logging.getLogger("eaas")
+
+GENERATED_PLANS_DIR = Path(__file__).parent / "generated_plans"
+GENERATED_PLANS_DIR.mkdir(exist_ok=True)
 
 KIRK_SERVE_PORT = int(os.environ.get("KIRK_PORT", "7000"))
 DISPATCHER_PORT = int(os.environ.get("DISPATCHER_PORT", "9000"))
@@ -41,6 +45,8 @@ ENABLE_ORACLE = os.environ.get("ENABLE_ORACLE", "1").strip() not in ("0", "", "f
 ENABLE_VIS = os.environ.get("ENABLE_VIS", "0").strip() not in ("0", "", "false", "False")
 TELEMETRY_PORT = int(os.environ.get("TELEMETRY_PORT", "8002"))
 VIS_PORT = int(os.environ.get("VIS_PORT", "5173"))
+PLAN_VIS_PORT = int(os.environ.get("PLAN_VIS_PORT", "9004"))
+PLAN_VIS_DIR = os.environ.get("PLAN_VIS_DIR", str(Path(__file__).parent / "plan_visualization"))
 # Public WebSocket URL used by the browser to reach the telemetry server.
 # Must be reachable from the client machine, not from inside the container.
 VIS_WS_URL = os.environ.get("VIS_WS_URL", f"ws://localhost:{TELEMETRY_PORT}/ws")
@@ -133,7 +139,11 @@ async def lifespan(app: FastAPI):
          "planexecutive.monitor.server.server:app",
          "--host", "127.0.0.1", "--port", str(MONITOR_PORT)],
         cwd=ROBUST_EXEC_DIR,
-        env={**base_env, "PORT": str(MONITOR_PORT)},
+        env={
+            **base_env,
+            "PORT": str(MONITOR_PORT),
+            "TELEMETRY_WS_URL": f"ws://127.0.0.1:{TELEMETRY_PORT}/ws",
+        },
         name="monitor",
     )
 
@@ -157,6 +167,18 @@ async def lifespan(app: FastAPI):
             name="telemetry",
         )
 
+    # ── Plan visualization server ─────────────────────────────────────────
+    _start_process(
+        ["uvicorn", "plan_visualization.server:app",
+         "--host", "0.0.0.0", "--port", str(PLAN_VIS_PORT)],
+        cwd=str(Path(__file__).parent),
+        env={
+            **base_env,
+            "TELEMETRY_WS_URL": f"ws://127.0.0.1:{TELEMETRY_PORT}/ws",
+        },
+        name="plan-visualization",
+    )
+
     # ── Visualization frontend (optional) ────────────────────────────────
     if ENABLE_VIS:
         log.info("Visualization enabled — starting Vite dev server")
@@ -176,6 +198,7 @@ async def lifespan(app: FastAPI):
         (f"http://127.0.0.1:{DISPATCHER_PORT}/docs", "dispatcher"),
         (f"http://127.0.0.1:{AGENT_PORT}/docs", "local-agent"),
         (f"http://127.0.0.1:{MONITOR_PORT}/docs", "monitor"),
+        (f"http://127.0.0.1:{PLAN_VIS_PORT}/docs", "plan-visualization"),
     ]
     if ENABLE_ORACLE:
         checks.append((f"http://127.0.0.1:{ORACLE_PORT}/docs", "local-oracle"))
@@ -200,6 +223,36 @@ async def lifespan(app: FastAPI):
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def _save_plan(plan_payload: dict, source: str):
+    """Save a plan received from Kirk to the generated_plans folder."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{timestamp}_{source}.json"
+    path = GENERATED_PLANS_DIR / filename
+    try:
+        path.write_text(json.dumps(plan_payload, indent=2))
+        log.info("Saved plan to %s", path)
+    except Exception as exc:
+        log.warning("Failed to save plan: %s", exc)
+
+
+async def _load_plan_visualization(plan_payload: dict):
+    """Send the plan to the plan visualization server."""
+    log.info("Loading plan into visualization server")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"http://127.0.0.1:{PLAN_VIS_PORT}/load",
+                json={"plan": plan_payload, "executions": []},
+                headers={"Content-Type": "application/json"},
+            )
+        if resp.status_code == 200:
+            log.info("Plan visualization loaded successfully")
+        else:
+            log.warning("Plan visualization load returned %s: %s", resp.status_code, resp.text)
+    except httpx.RequestError as exc:
+        log.warning("Could not reach plan visualization server: %s", exc)
 
 
 async def _initialize_monitor(plan_payload: dict):
@@ -285,9 +338,11 @@ async def execute(request: Request):
         raise HTTPException(status_code=502, detail="Kirk returned non-JSON response")
 
     log.info("Plan received from kirk-serve")
+    _save_plan(plan_payload, "rmpl")
 
-    # ── Step 2: Initialize causal link monitor ─────────────────────────────
+    # ── Step 2: Initialize causal link monitor & plan visualization ────────
     await _initialize_monitor(plan_payload)
+    await _load_plan_visualization(plan_payload)
 
     # ── Step 3: Dispatch plan via pykirk dispatcher ───────────────────────
     try:
@@ -395,9 +450,11 @@ async def execute_pddl(
         raise HTTPException(status_code=502, detail="Kirk returned non-JSON response")
 
     log.info("Plan received from kirk")
+    _save_plan(plan_payload, "pddl")
 
-    # ── Step 3: Initialize causal link monitor ────────────────────────────────
+    # ── Step 3: Initialize causal link monitor & plan visualization ────────────
     await _initialize_monitor(plan_payload)
+    await _load_plan_visualization(plan_payload)
 
     # ── Step 4: Dispatch plan via pykirk dispatcher ───────────────────────────
     try:
@@ -431,6 +488,7 @@ async def health():
         (f"http://127.0.0.1:{DISPATCHER_PORT}/docs", "dispatcher"),
         (f"http://127.0.0.1:{AGENT_PORT}/docs", "agent"),
         (f"http://127.0.0.1:{MONITOR_PORT}/docs", "monitor"),
+        (f"http://127.0.0.1:{PLAN_VIS_PORT}/docs", "plan-visualization"),
     ]
     if ENABLE_ORACLE:
         checks.append((f"http://127.0.0.1:{ORACLE_PORT}/docs", "oracle"))

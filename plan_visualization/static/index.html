@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Plan Execution Visualization</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Plan Execution Visualization</h1>
+    <div id="controls">
+      <label for="file-input">Load plan JSON:</label>
+      <input type="file" id="file-input" accept=".json">
+      <button id="btn-load" disabled>Visualize</button>
+      <span id="status"></span>
+    </div>
+  </header>
+
+  <div id="main">
+    <!-- Timeline view -->
+    <section id="timeline-section">
+      <h2>Execution Timeline</h2>
+      <div id="timeline-container">
+        <svg id="timeline-svg"></svg>
+      </div>
+    </section>
+
+    <!-- Constraint graph view -->
+    <section id="graph-section">
+      <h2>Temporal Constraint Graph</h2>
+      <div id="graph-controls">
+        <label><input type="checkbox" id="toggle-causal" checked> Highlight causal links</label>
+        <button id="btn-reset-zoom">Reset Zoom</button>
+      </div>
+      <div id="graph-container">
+        <svg id="graph-svg"></svg>
+      </div>
+    </section>
+  </div>
+
+  <!-- Tooltip -->
+  <div id="tooltip" class="tooltip"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

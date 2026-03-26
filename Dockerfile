@@ -120,13 +120,16 @@ RUN npm install
 COPY --from=kirk-builder /common-lisp/enterprise/build/ /app/kirk/
 
 # ── Install the wrapper server's own dependencies ─────────────────────────────
-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" httpx
+RUN pip install --no-cache-dir fastapi "uvicorn[standard]" httpx websockets
 
 # ── Copy pddl_to_sp converter ─────────────────────────────────────────────────
 COPY pddl_to_sp/ /app/pddl_to_sp/
 
 # ── Copy robust-execution monitor ────────────────────────────────────────────
 COPY robust-execution/ /app/robust-execution/
+
+# ── Copy plan visualization module ───────────────────────────────────────────
+COPY plan_visualization/ /app/plan_visualization/
 
 # ── Copy application files ────────────────────────────────────────────────────
 COPY server.py /app/server.py
@@ -135,9 +138,13 @@ RUN chmod +x /app/start.sh
 
 WORKDIR /app
 
+# ── Generated plans output directory (bind-mount to persist on host) ─────────
+RUN mkdir -p /app/generated_plans
+VOLUME /app/generated_plans
+
 # Ports: 8000 = EaaS API, 9000 = dispatcher (when oracle disabled), 8002 = telemetry (vis),
-#        5173 = Vite dev server (vis), 9003 = monitor
-EXPOSE 8000 9000 8002 5173 9003
+#        5173 = Vite dev server (vis), 9003 = monitor, 9004 = plan visualization
+EXPOSE 8000 9000 8002 5173 9003 9004
 
 ENV KIRK_BINARY=/app/kirk/kirk \
     PYKIRK_DIR=/app/pykirk \
@@ -148,6 +155,8 @@ ENV KIRK_BINARY=/app/kirk/kirk \
     LOCAL_AGENT_PORT=9001 \
     LOCAL_ORACLE_PORT=9002 \
     MONITOR_PORT=9003 \
+    PLAN_VIS_PORT=9004 \
+    PLAN_VIS_DIR=/app/plan_visualization \
     ENABLE_ORACLE=1 \
     ENABLE_VIS=0 \
     TELEMETRY_PORT=8002 \
