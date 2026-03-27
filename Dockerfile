@@ -138,9 +138,8 @@ RUN chmod +x /app/start.sh
 
 WORKDIR /app
 
-# ── Generated plans output directory (bind-mount to persist on host) ─────────
+# ── Generated plans output directory (bind-mount at run time to persist) ─────
 RUN mkdir -p /app/generated_plans
-VOLUME /app/generated_plans
 
 # Ports: 8000 = EaaS API, 9000 = dispatcher (when oracle disabled), 8002 = telemetry (vis),
 #        5173 = Vite dev server (vis), 9003 = monitor, 9004 = plan visualization
@@ -159,6 +158,7 @@ ENV KIRK_BINARY=/app/kirk/kirk \
     PLAN_VIS_DIR=/app/plan_visualization \
     ENABLE_ORACLE=1 \
     ENABLE_VIS=0 \
+    SIMULATE_FAULTS=0 \
     TELEMETRY_PORT=8002 \
     VIS_PORT=5173 \
     VIS_WS_URL=ws://localhost:8002/ws

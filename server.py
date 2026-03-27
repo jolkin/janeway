@@ -20,6 +20,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
+from starlette.responses import StreamingResponse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,8 +42,10 @@ PYKIRK_DIR = os.environ.get("PYKIRK_DIR", "/app/pykirk")
 PDDL_TO_SP_DIR = os.environ.get("PDDL_TO_SP_DIR", "/app/pddl_to_sp")
 ROBUST_EXEC_DIR = os.environ.get("ROBUST_EXEC_DIR", "/app/robust-execution")
 MONITOR_PORT = int(os.environ.get("MONITOR_PORT", "9003"))
+SERVER_PORT = int(os.environ.get("SERVER_PORT", "8000"))
 ENABLE_ORACLE = os.environ.get("ENABLE_ORACLE", "1").strip() not in ("0", "", "false", "False")
 ENABLE_VIS = os.environ.get("ENABLE_VIS", "0").strip() not in ("0", "", "false", "False")
+SIMULATE_FAULTS = os.environ.get("SIMULATE_FAULTS", "0")
 TELEMETRY_PORT = int(os.environ.get("TELEMETRY_PORT", "8002"))
 VIS_PORT = int(os.environ.get("VIS_PORT", "5173"))
 PLAN_VIS_PORT = int(os.environ.get("PLAN_VIS_PORT", "9004"))
@@ -56,6 +59,7 @@ if PDDL_TO_SP_DIR not in sys.path:
     sys.path.insert(0, PDDL_TO_SP_DIR)
 
 _processes: list[subprocess.Popen] = []
+_violation_subscribers: list[asyncio.Queue] = []
 
 
 async def wait_for_http(url: str, timeout: float = 60.0) -> bool:
@@ -106,6 +110,8 @@ async def lifespan(app: FastAPI):
         "LOCAL_ORACLE_PORT": str(ORACLE_PORT),
         "TELEMETRY_PORT": str(TELEMETRY_PORT),
         "ENVIRONMENT": "dev" if ENABLE_ORACLE else "prod",
+        "MONITOR_URL": f"http://127.0.0.1:{MONITOR_PORT}",
+        "SIMULATE_FAULTS": SIMULATE_FAULTS,
     }
 
     # When the oracle is disabled, external systems (e.g. a ROS bridge) provide
@@ -143,6 +149,8 @@ async def lifespan(app: FastAPI):
             **base_env,
             "PORT": str(MONITOR_PORT),
             "TELEMETRY_WS_URL": f"ws://127.0.0.1:{TELEMETRY_PORT}/ws",
+            "VIOLATION_CALLBACK_URL": f"http://127.0.0.1:{SERVER_PORT}/violations",
+            "PLAN_VIS_URL": f"http://127.0.0.1:{PLAN_VIS_PORT}",
         },
         name="monitor",
     )
@@ -255,6 +263,26 @@ async def _load_plan_visualization(plan_payload: dict):
         log.warning("Could not reach plan visualization server: %s", exc)
 
 
+async def _load_oracle_plan(plan_payload: dict):
+    """Send the plan to the oracle so it can extract causal links for state updates."""
+    if not ENABLE_ORACLE:
+        return
+    log.info("Loading plan into oracle for causal link extraction")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"http://127.0.0.1:{ORACLE_PORT}/plan",
+                json=plan_payload,
+                headers={"Content-Type": "application/json"},
+            )
+        if resp.status_code == 200:
+            log.info("Oracle plan loaded: %s", resp.json())
+        else:
+            log.warning("Oracle plan load returned %s: %s", resp.status_code, resp.text)
+    except httpx.RequestError as exc:
+        log.warning("Could not reach oracle: %s", exc)
+
+
 async def _initialize_monitor(plan_payload: dict):
     """Send the plan to the causal link monitor for initialization."""
     log.info("Initializing causal link monitor with plan")
@@ -340,8 +368,9 @@ async def execute(request: Request):
     log.info("Plan received from kirk-serve")
     _save_plan(plan_payload, "rmpl")
 
-    # ── Step 2: Initialize causal link monitor & plan visualization ────────
+    # ── Step 2: Initialize causal link monitor, oracle & plan visualization ─
     await _initialize_monitor(plan_payload)
+    await _load_oracle_plan(plan_payload)
     await _load_plan_visualization(plan_payload)
 
     # ── Step 3: Dispatch plan via pykirk dispatcher ───────────────────────
@@ -452,8 +481,9 @@ async def execute_pddl(
     log.info("Plan received from kirk")
     _save_plan(plan_payload, "pddl")
 
-    # ── Step 3: Initialize causal link monitor & plan visualization ────────────
+    # ── Step 3: Initialize causal link monitor, oracle & plan visualization ────
     await _initialize_monitor(plan_payload)
+    await _load_oracle_plan(plan_payload)
     await _load_plan_visualization(plan_payload)
 
     # ── Step 4: Dispatch plan via pykirk dispatcher ───────────────────────────
@@ -508,3 +538,57 @@ async def health():
 
     overall = "ok" if all(v == "ok" for v in results.values()) else "degraded"
     return {"status": overall, "services": results}
+
+
+@app.post("/violations")
+async def receive_violation(request: Request):
+    """Internal endpoint — receives violation reports from the causal link monitor.
+
+    When a violation is received, the dispatcher is halted to prevent further
+    actions from being dispatched under an invalid plan state.
+    """
+    payload = await request.json()
+    log.warning("Causal link violation: %s", payload)
+    for queue in _violation_subscribers:
+        await queue.put(payload)
+
+    # Halt the dispatcher so no further actions are dispatched.
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                f"http://127.0.0.1:{DISPATCHER_PORT}/halt",
+                json={"reason": f"Causal link violation: {payload.get('violations', [])}"},
+            )
+            log.warning("Dispatcher halt requested (status=%s)", resp.status_code)
+    except Exception as exc:
+        log.error("Failed to halt dispatcher: %s", exc)
+
+    return {"status": "received", "dispatcher": "halt requested"}
+
+
+@app.get("/violations")
+async def stream_violations(request: Request):
+    """SSE stream of causal link violations. Connect to receive real-time alerts."""
+    queue: asyncio.Queue = asyncio.Queue()
+    _violation_subscribers.append(queue)
+
+    async def event_generator():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    data = json.dumps(payload)
+                    yield f"data: {data}\n\n"
+                except asyncio.TimeoutError:
+                    # Send keepalive comment to prevent connection timeout
+                    yield ": keepalive\n\n"
+        finally:
+            _violation_subscribers.remove(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

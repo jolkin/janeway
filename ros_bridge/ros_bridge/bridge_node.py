@@ -11,6 +11,12 @@ Inbound (ROS → container):
         {"event": "<event_name>", "execution_time": <float>, "is_controllable": <bool>}
     The node POSTs a ReportExecutionPayloadDTO to the dispatcher's
     /handle_execution endpoint so the dispatch cycle can advance.
+
+    Subscribes to /eaas/state_updates.  Each message is expected to be a
+    JSON string mapping state variable names to their observed values, e.g.:
+        {"rover1.at": "waypoint2", "rover1.has_sample": true}
+    The node POSTs the update to the causal link monitor's
+    /observe-state-update endpoint.
 """
 
 import asyncio
@@ -34,20 +40,27 @@ class EaaSBridgeNode(Node):
         # ── Declare parameters ────────────────────────────────────────────
         self.declare_parameter("telemetry_ws_url", "ws://localhost:8002/ws")
         self.declare_parameter("dispatcher_url", "http://localhost:9000")
+        self.declare_parameter("monitor_url", "http://localhost:9003")
         self.declare_parameter("event_topic", "/eaas/events")
         self.declare_parameter("report_topic", "/eaas/execution_reports")
+        self.declare_parameter("state_update_topic", "/eaas/state_updates")
         self.declare_parameter("reconnect_delay", 3.0)
 
         self._ws_url = self.get_parameter("telemetry_ws_url").value
         self._dispatcher_url = self.get_parameter("dispatcher_url").value
+        self._monitor_url = self.get_parameter("monitor_url").value
         event_topic = self.get_parameter("event_topic").value
         report_topic = self.get_parameter("report_topic").value
+        state_update_topic = self.get_parameter("state_update_topic").value
         self._reconnect_delay = self.get_parameter("reconnect_delay").value
 
         # ── Publishers / subscribers ──────────────────────────────────────
         self._event_pub = self.create_publisher(String, event_topic, 10)
         self._report_sub = self.create_subscription(
             String, report_topic, self._on_execution_report, 10,
+        )
+        self._state_update_sub = self.create_subscription(
+            String, state_update_topic, self._on_state_update, 10,
         )
 
         # ── Background asyncio loop for WebSocket + HTTP ──────────────────
@@ -60,7 +73,9 @@ class EaaSBridgeNode(Node):
         self.get_logger().info(
             f"EaaS bridge started — WS: {self._ws_url}, "
             f"dispatcher: {self._dispatcher_url}, "
-            f"pub: {event_topic}, sub: {report_topic}"
+            f"monitor: {self._monitor_url}, "
+            f"pub: {event_topic}, sub: {report_topic}, "
+            f"state_updates: {state_update_topic}"
         )
 
     # ── Asyncio event loop (runs in background thread) ────────────────────
@@ -165,6 +180,49 @@ class EaaSBridgeNode(Node):
                         )
         except Exception as exc:
             self.get_logger().error(f"Failed to POST execution report: {exc}")
+
+    # ── Inbound: ROS topic → monitor HTTP (state updates) ─────────────
+
+    def _on_state_update(self, msg: String):
+        """Forward a state update from ROS to the causal link monitor."""
+        try:
+            update = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self.get_logger().error("Ignoring malformed state update (not JSON)")
+            return
+
+        if not isinstance(update, dict) or not update:
+            self.get_logger().error("State update must be a non-empty JSON object")
+            return
+
+        self.get_logger().info(f"Forwarding state update: {update}")
+        asyncio.run_coroutine_threadsafe(
+            self._post_state_update(update), self._loop,
+        )
+
+    async def _post_state_update(self, update: dict):
+        """POST a state update to the causal link monitor."""
+        url = f"{self._monitor_url}/observe-state-update"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json=update,
+                    headers={"Content-Type": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 200:
+                        body = await resp.json()
+                        self.get_logger().info(
+                            f"Monitor accepted state update (success={body.get('success')})"
+                        )
+                    else:
+                        body = await resp.text()
+                        self.get_logger().warn(
+                            f"Monitor returned {resp.status}: {body}"
+                        )
+        except Exception as exc:
+            self.get_logger().error(f"Failed to POST state update: {exc}")
 
 
 def main(args=None):

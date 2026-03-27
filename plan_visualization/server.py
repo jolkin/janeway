@@ -19,8 +19,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import websockets
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -40,13 +41,14 @@ logging.basicConfig(
 log = logging.getLogger("plan-vis")
 
 TELEMETRY_WS_URL = os.environ.get("TELEMETRY_WS_URL", "ws://127.0.0.1:8002/ws")
+DISPATCHER_PORT = int(os.environ.get("DISPATCHER_PORT", "9000"))
 
 # In-memory store for the current visualization data
 _current_graph: Optional[dict] = None
 # Accumulated raw execution times from telemetry {event_id: wall_clock_time}
 _exec_times: dict[str, float] = {}
 # The start event ID for the current plan (used as t=0 reference)
-_start_event: Optional[str] = "START"
+_start_event: Optional[str] = None
 # Connected frontend WebSocket clients for live updates
 _ws_clients: set[WebSocket] = set()
 # Background telemetry listener task
@@ -109,19 +111,22 @@ def _build_graph(plan_data: dict, exec_times: dict[str, float]) -> dict:
     raw = plan_data.get("goalPlan", plan_data)
     plan = StatePlanDTO.model_validate(raw)
 
-    # Record start event for time normalization
-    _start_event = "START"
+    # Record start event for time normalization (from the plan itself)
+    _start_event = plan.startEvent
 
     # Determine t=0 from the start event's wall-clock execution time
     t0 = exec_times.get(_start_event, 0.0)
 
-    # Build episode lookup: event → activity name
+    # Build episode lookup: event → activity name (from both episode types)
     event_to_activity: dict[str, str] = {}
-    episodes_out = []
-
     for ep in plan.goalEpisodes + plan.valueEpisodes:
         event_to_activity.setdefault(ep.startEvent, ep.activityName)
         event_to_activity.setdefault(ep.endEvent, ep.activityName)
+
+    # Only value episodes are shown on the timeline (goal episodes are
+    # redundant — they share the same events but describe preconditions).
+    episodes_out = []
+    for ep in plan.valueEpisodes:
         episodes_out.append({
             "id": ep.id,
             "startEvent": ep.startEvent,
@@ -136,9 +141,9 @@ def _build_graph(plan_data: dict, exec_times: dict[str, float]) -> dict:
     for ev in plan.stateSpace.events:
         eid = ev.id
         # Determine node type
-        if eid == "START":
+        if eid == _start_event:
             ntype = "start"
-        elif eid in ("end-event", "plan-end"):
+        elif eid in ("end-event", "end", "END"):
             ntype = "end"
         elif "_start" in eid.lower() or eid.lower().startswith("start"):
             ntype = "action_start"
@@ -406,6 +411,33 @@ async def websocket_endpoint(ws: WebSocket):
     finally:
         _ws_clients.discard(ws)
         log.info("Frontend WebSocket client disconnected (%d remaining)", len(_ws_clients))
+
+
+@app.post("/monitor-event")
+async def monitor_event(request: Request):
+    """Receive a state update (with optional violations) from the causal link monitor."""
+    payload = await request.json()
+    # Stamp with the latest normalized execution time so the frontend can
+    # position state-update markers at the correct point on the timeline.
+    if _exec_times:
+        latest_raw = max(_exec_times.values())
+        payload["time"] = _normalize_time(latest_raw)
+    log.info("Monitor event: %s", payload)
+    await _broadcast(payload)
+    return {"status": "ok"}
+
+
+@app.get("/dispatchable-form")
+async def get_dispatchable_form():
+    """Proxy the dispatchable form from pykirk's dispatcher for frontend visualization."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"http://127.0.0.1:{DISPATCHER_PORT}/dispatchable-form")
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        return resp.json()
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"Dispatcher unreachable: {exc}")
 
 
 @app.get("/", response_class=HTMLResponse)

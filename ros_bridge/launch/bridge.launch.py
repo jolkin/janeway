@@ -28,6 +28,16 @@ def generate_launch_description():
             default_value="/eaas/execution_reports",
             description="ROS topic for inbound execution reports",
         ),
+        DeclareLaunchArgument(
+            "monitor_url",
+            default_value="http://localhost:9003",
+            description="HTTP base URL of the EaaS causal link monitor",
+        ),
+        DeclareLaunchArgument(
+            "state_update_topic",
+            default_value="/eaas/state_updates",
+            description="ROS topic for inbound state updates",
+        ),
         Node(
             package="ros_bridge",
             executable="bridge_node",
@@ -35,8 +45,10 @@ def generate_launch_description():
             parameters=[{
                 "telemetry_ws_url": LaunchConfiguration("telemetry_ws_url"),
                 "dispatcher_url": LaunchConfiguration("dispatcher_url"),
+                "monitor_url": LaunchConfiguration("monitor_url"),
                 "event_topic": LaunchConfiguration("event_topic"),
                 "report_topic": LaunchConfiguration("report_topic"),
+                "state_update_topic": LaunchConfiguration("state_update_topic"),
             }],
             output="screen",
         ),
