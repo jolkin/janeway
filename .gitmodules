@@ -7,3 +7,6 @@
 [submodule "pddl_to_sp"]
 	path = pddl_to_sp
 	url = https://git.mers.csail.mit.edu/enterprise/pddl_to_sp
+[submodule "robust-execution"]
+	path = robust-execution
+	url = https://git.mers.csail.mit.edu/enterprise/robust-execution

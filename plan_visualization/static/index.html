@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Plan Execution Visualization</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://unpkg.com/d3-dag@1.1.0"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Plan Execution Visualization</h1>
+    <div id="controls">
+      <label for="file-input">Load plan JSON:</label>
+      <input type="file" id="file-input" accept=".json">
+      <button id="btn-load" disabled>Visualize</button>
+      <span id="status"></span>
+    </div>
+  </header>
+
+  <div id="main">
+    <!-- Timeline view -->
+    <section id="timeline-section">
+      <h2>Execution Timeline</h2>
+      <div id="timeline-container">
+        <svg id="timeline-svg"></svg>
+      </div>
+    </section>
+
+    <!-- Constraint graph view -->
+    <section id="graph-section">
+      <h2>Temporal Constraint Graph</h2>
+      <div id="graph-controls">
+        <label><input type="checkbox" id="toggle-causal" checked> Highlight causal links</label>
+        <label><input type="checkbox" id="toggle-plain-edges" checked> Plain edges</label>
+        <button id="btn-reset-zoom">Reset Zoom</button>
+        <button id="btn-show-mdf">Show Dispatchable Form</button>
+      </div>
+      <div id="graph-container">
+        <svg id="graph-svg"></svg>
+      </div>
+    </section>
+
+    <!-- Minimum Dispatchable Form view (hidden by default) -->
+    <section id="mdf-section" style="display: none;">
+      <h2>Minimum Dispatchable Form <button id="btn-hide-mdf" style="float:right; margin-right:16px;">Hide</button></h2>
+      <div id="mdf-controls">
+        <button id="btn-load-mdf">Load MDF</button>
+        <label><input type="checkbox" id="toggle-wait" checked> Wait edges</label>
+        <label><input type="checkbox" id="toggle-contingent" checked> Contingent links</label>
+        <label><input type="checkbox" id="toggle-ordinary" checked> Ordinary edges</label>
+        <button id="btn-reset-mdf-zoom">Reset Zoom</button>
+        <span id="mdf-status"></span>
+      </div>
+      <div id="mdf-container">
+        <svg id="mdf-svg"></svg>
+      </div>
+    </section>
+  </div>
+
+  <!-- Tooltip -->
+  <div id="tooltip" class="tooltip"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

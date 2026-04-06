@@ -74,6 +74,7 @@ RUN sbcl --non-interactive \
 RUN sbcl --non-interactive \
          --eval "(require :asdf)" \
          --eval "(declaim (sb-ext:muffle-conditions style-warning))" \
+         --eval "(declaim (optimize (debug 3)))" \
          --eval "(asdf:make :kirk-v2)" \
     && ls -lh /common-lisp/enterprise/build/kirk*
 
@@ -92,9 +93,14 @@ FROM python:3.13-slim AS runtime
 # Runtime system packages.
 # libssl / libcrypto are needed because kirk's deploy-op marks them :dont-deploy
 # (they are expected to be present on the host).
+# curl is needed for the NodeSource setup script.
+# nodejs (>=20) is needed to run the Vite visualization dev server.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
         libssl3 \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Install uv (used to run pykirk services) ──────────────────────────────────
@@ -105,14 +111,26 @@ COPY pykirk/ /app/pykirk/
 WORKDIR /app/pykirk
 RUN uv pip install --system -e .
 
+# ── Pre-install visualization npm dependencies ────────────────────────────────
+# The dev server is only started when ENABLE_VIS=1 at runtime, but we install
+# dependencies at build time so startup is fast.
+WORKDIR /app/pykirk/visualization
+RUN npm install
+
 # ── Copy the kirk binary bundle from stage 1 ──────────────────────────────────
 COPY --from=kirk-builder /common-lisp/enterprise/build/ /app/kirk/
 
 # ── Install the wrapper server's own dependencies ─────────────────────────────
-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" httpx
+RUN pip install --no-cache-dir fastapi "uvicorn[standard]" httpx websockets
 
 # ── Copy pddl_to_sp converter ─────────────────────────────────────────────────
 COPY pddl_to_sp/ /app/pddl_to_sp/
+
+# ── Copy robust-execution monitor ────────────────────────────────────────────
+COPY robust-execution/ /app/robust-execution/
+
+# ── Copy plan visualization module ───────────────────────────────────────────
+COPY plan_visualization/ /app/plan_visualization/
 
 # ── Copy application files ────────────────────────────────────────────────────
 COPY server.py /app/server.py
@@ -121,15 +139,29 @@ RUN chmod +x /app/start.sh
 
 WORKDIR /app
 
-# Port exposed to the outside world
-EXPOSE 8000
+# ── Generated plans output directory (bind-mount at run time to persist) ─────
+RUN mkdir -p /app/generated_plans
+
+# Ports: 8000 = EaaS API, 9000 = dispatcher (when oracle disabled), 8002 = telemetry (vis),
+#        5173 = Vite dev server (vis), 9003 = monitor, 9004 = plan visualization
+EXPOSE 8000 9000 8002 5173 9003 9004
 
 ENV KIRK_BINARY=/app/kirk/kirk \
     PYKIRK_DIR=/app/pykirk \
     PDDL_TO_SP_DIR=/app/pddl_to_sp \
+    ROBUST_EXEC_DIR=/app/robust-execution \
     KIRK_PORT=7000 \
     DISPATCHER_PORT=9000 \
     LOCAL_AGENT_PORT=9001 \
-    LOCAL_ORACLE_PORT=9002
+    LOCAL_ORACLE_PORT=9002 \
+    MONITOR_PORT=9003 \
+    PLAN_VIS_PORT=9004 \
+    PLAN_VIS_DIR=/app/plan_visualization \
+    ENABLE_ORACLE=1 \
+    ENABLE_VIS=0 \
+    SIMULATE_FAULTS=0 \
+    TELEMETRY_PORT=8002 \
+    VIS_PORT=5173 \
+    VIS_WS_URL=ws://localhost:8002/ws
 
 ENTRYPOINT ["/app/start.sh"]
