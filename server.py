@@ -140,10 +140,13 @@ async def lifespan(app: FastAPI):
         )
 
     # ── Causal link monitor server ─────────────────────────────────────────
+    # When the oracle is disabled, external systems (e.g. a ROS bridge) send
+    # state updates directly, so the monitor must be reachable from outside.
+    monitor_host = "127.0.0.1" if ENABLE_ORACLE else "0.0.0.0"
     _start_process(
         ["uv", "run", "uvicorn",
          "planexecutive.monitor.server.server:app",
-         "--host", "127.0.0.1", "--port", str(MONITOR_PORT)],
+         "--host", monitor_host, "--port", str(MONITOR_PORT)],
         cwd=ROBUST_EXEC_DIR,
         env={
             **base_env,
@@ -353,8 +356,10 @@ async def execute(request: Request):
         raise HTTPException(status_code=503, detail=f"Kirk planning server unreachable: {exc}")
 
     if resp.status_code == 422:
+        log.error("Kirk planning failed (422) for RMPL:\n%s", resp.text)
         raise HTTPException(status_code=422, detail="No feasible plan found for the given RMPL program")
     if resp.status_code != 200:
+        log.error("Kirk planning error (%s) for RMPL:\n%s", resp.status_code, resp.text)
         raise HTTPException(
             status_code=502,
             detail=f"Kirk planning server error ({resp.status_code}): {resp.text}",
@@ -443,8 +448,10 @@ async def execute_pddl(
         populate_goal_episodes(state_plan, plan, domain_path, problem_path, action_counts)
         populate_value_episodes(state_plan, plan, domain_path, problem_path, action_counts)
         state_plan_json = json.dumps(state_plan)
-        print("Generated state plan JSON:", state_plan_json)
+        _save_plan(state_plan, "pddl_to_sp")
+        log.info("Generated state plan JSON from PDDL")
     except Exception as exc:
+        log.exception("PDDL conversion error")
         raise HTTPException(status_code=422, detail=f"PDDL conversion error: {exc}")
     finally:
         for p in (domain_path, problem_path):
@@ -466,8 +473,10 @@ async def execute_pddl(
         raise HTTPException(status_code=503, detail=f"Kirk planning server unreachable: {exc}")
 
     if resp.status_code == 422:
+        log.error("Kirk planning failed (422) for state plan:\n%s", resp.text)
         raise HTTPException(status_code=422, detail="No feasible plan found for the given state plan")
     if resp.status_code != 200:
+        log.error("Kirk planning error (%s) for state plan:\n%s", resp.status_code, resp.text)
         raise HTTPException(
             status_code=502,
             detail=f"Kirk planning server error ({resp.status_code}): {resp.text}",

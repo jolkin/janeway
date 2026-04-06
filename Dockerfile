@@ -74,6 +74,7 @@ RUN sbcl --non-interactive \
 RUN sbcl --non-interactive \
          --eval "(require :asdf)" \
          --eval "(declaim (sb-ext:muffle-conditions style-warning))" \
+         --eval "(declaim (optimize (debug 3)))" \
          --eval "(asdf:make :kirk-v2)" \
     && ls -lh /common-lisp/enterprise/build/kirk*
 
