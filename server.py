@@ -40,6 +40,7 @@ ORACLE_PORT = int(os.environ.get("LOCAL_ORACLE_PORT", "9002"))
 KIRK_BINARY = os.environ.get("KIRK_BINARY", "/app/kirk/kirk")
 PYKIRK_DIR = os.environ.get("PYKIRK_DIR", "/app/pykirk")
 PDDL_TO_SP_DIR = os.environ.get("PDDL_TO_SP_DIR", "/app/pddl_to_sp")
+PDDL_TO_SP_SRC_DIR = os.environ.get("PDDL_TO_SP_SRC_DIR", f"{PDDL_TO_SP_DIR}/src")
 ROBUST_EXEC_DIR = os.environ.get("ROBUST_EXEC_DIR", "/app/robust-execution")
 MONITOR_PORT = int(os.environ.get("MONITOR_PORT", "9003"))
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "8000"))
@@ -54,9 +55,10 @@ PLAN_VIS_DIR = os.environ.get("PLAN_VIS_DIR", str(Path(__file__).parent / "plan_
 # Must be reachable from the client machine, not from inside the container.
 VIS_WS_URL = os.environ.get("VIS_WS_URL", f"ws://localhost:{TELEMETRY_PORT}/ws")
 
-# Make pddl_to_sp importable (uses bare imports internally).
-if PDDL_TO_SP_DIR not in sys.path:
-    sys.path.insert(0, PDDL_TO_SP_DIR)
+# Make pddl_to_sp importable (uses bare imports internally — all of its
+# submodules live under pddl_to_sp/src/ after the recent refactor).
+if PDDL_TO_SP_SRC_DIR not in sys.path:
+    sys.path.insert(0, PDDL_TO_SP_SRC_DIR)
 
 _processes: list[subprocess.Popen] = []
 _violation_subscribers: list[asyncio.Queue] = []
@@ -91,6 +93,9 @@ def _start_process(cmd: list[str], cwd: str | None, env: dict, name: str) -> sub
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     base_env = os.environ.copy()
+    # Expose the generated_plans directory so the Kirk binary can drop
+    # visualization artefacts (e.g. STNU checker PDFs) alongside plan JSON.
+    base_env["GENERATED_PLANS_DIR"] = str(GENERATED_PLANS_DIR)
 
     # ── Kirk planning server ───────────────────────────────────────────────
     _start_process(

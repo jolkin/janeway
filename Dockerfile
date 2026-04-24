@@ -95,9 +95,12 @@ FROM python:3.13-slim AS runtime
 # (they are expected to be present on the host).
 # curl is needed for the NodeSource setup script.
 # nodejs (>=20) is needed to run the Vite visualization dev server.
+# graphviz provides the `dot` binary used by Kirk's tn:dot-visualize to render
+# STNU checker PDFs into /app/generated_plans.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        graphviz \
         libssl3 \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
