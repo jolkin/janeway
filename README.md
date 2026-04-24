@@ -1,19 +1,21 @@
 # Execution as a Service
 
-A Docker container that exposes an HTTP API for executing plans end-to-end. It supports two input formats: RMPL programs (native Kirk format) and PDDL domain/problem/plan triples (converted via [pddl_to_sp](pddl_to_sp/)). In both cases, planning runs through [Kirk](enterprise/kirk-v2/) and dispatch runs through [PyKirk](pykirk/).
+A Docker container that exposes an HTTP API for executing plans end-to-end. It supports three input formats: RMPL programs (native Kirk format), PDDL domain/problem/plan triples (converted via [pddl_to_sp](pddl_to_sp/)), and raw state plan JSON (fed straight to Kirk). In all cases, planning runs through [Kirk](enterprise/kirk-v2/) and dispatch runs through [PyKirk](pykirk/).
 
 ## Architecture
 
 ```
 Client
   │
-  ├── POST /execute          (RMPL program text)
+  ├── POST /execute            (RMPL program text)
   │
-  └── POST /execute-pddl     (PDDL domain + problem + temporal plan)
-              │
-              ▼
-       pddl_to_sp  (Python, in-process)
-       Converts PDDL inputs to a state plan JSON.
+  ├── POST /execute-pddl       (PDDL domain + problem + temporal plan)
+  │           │
+  │           ▼
+  │    pddl_to_sp  (Python, in-process)
+  │    Converts PDDL inputs to a state plan JSON.
+  │
+  └── POST /execute-state-plan (raw state plan JSON, bypasses pddl_to_sp)
               │
               ▼
 server.py  (FastAPI, port 8000)
@@ -52,7 +54,12 @@ On container startup, `server.py` launches all internal services and waits for t
 2. **Plan** — the state plan JSON is forwarded to `kirk serve` at `POST /plan-from-state-plan`. Kirk deserializes it, runs the planner, and returns a new scheduled state plan JSON.
 3. **Dispatch** — the causal link monitor is initialized with the plan, the oracle extracts causal links, and the plan is forwarded to the PyKirk dispatcher at `POST /plans`.
 
-In both paths, the generated plan JSON is saved to `generated_plans/` and loaded into the plan visualization server.
+**State plan path** (`POST /execute-state-plan`) — two steps:
+
+1. **Plan** — the provided state plan JSON is forwarded directly to `kirk serve` at `POST /plan-from-state-plan` (no pre-processing). Kirk deserializes it, runs the planner, and returns a new scheduled state plan JSON. Useful when a state plan is produced by some other upstream source (e.g. a pre-saved `pddl_to_sp` output, a handwritten plan, or a different planner).
+2. **Dispatch** — the causal link monitor is initialized with the plan, the oracle extracts causal links, and the plan is forwarded to the PyKirk dispatcher at `POST /plans`.
+
+In all paths, the generated plan JSON is saved to `generated_plans/` and loaded into the plan visualization server.
 
 ## Building
 
@@ -274,6 +281,25 @@ curl -X POST http://localhost:8000/execute-pddl \
 **Processing steps:**
 1. `pddl_to_sp` parses the domain and problem files and the temporal plan text, then assembles a state plan JSON (schema version `0.4-0`).
 2. The state plan JSON is sent to Kirk's `POST /plan-from-state-plan` endpoint, which deserializes it, runs the planner, and returns a new scheduled state plan.
+3. The scheduled state plan is dispatched to PyKirk via `POST /plans`.
+
+### `POST /execute-state-plan`
+
+Submit a state plan JSON directly for planning and execution. This skips `pddl_to_sp` and any RMPL-to-plan translation; the body is forwarded verbatim to Kirk's `POST /plan-from-state-plan`.
+
+**Request body** — raw state plan JSON with `Content-Type: application/json`. The JSON must conform to Odo's state plan schema (version `0.3-0` or `0.4-0`), the same shape produced by `pddl_to_sp` and by Kirk's own planning output.
+
+**Response** — `202 Accepted` with `{"status": "dispatched", ...}` on success.
+
+```bash
+curl -X POST http://localhost:8000/execute-state-plan \
+     -H "Content-Type: application/json" \
+     --data-binary @my_state_plan.json
+```
+
+**Processing steps:**
+1. The state plan JSON is saved to `generated_plans/<timestamp>_state_plan_input.json`.
+2. The JSON is sent to Kirk's `POST /plan-from-state-plan` endpoint, which runs the planner and returns a new scheduled state plan.
 3. The scheduled state plan is dispatched to PyKirk via `POST /plans`.
 
 ### `GET /health`

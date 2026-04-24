@@ -519,6 +519,93 @@ async def execute_pddl(
     )
 
 
+@app.post("/execute-state-plan")
+async def execute_state_plan(request: Request):
+    """
+    Accept a state plan JSON (same shape as the output of pddl_to_sp or any
+    upstream planner that produces an Odo state plan), send it to Kirk for
+    planning, and continue through the usual downstream pipeline (monitor
+    initialization, oracle load, visualization, dispatch).
+
+    Request body: raw state plan JSON (Content-Type: application/json).
+    """
+    content_type = request.headers.get("content-type", "")
+    if "application/json" not in content_type:
+        raise HTTPException(
+            status_code=400,
+            detail="Request body must be JSON (Content-Type: application/json)",
+        )
+
+    try:
+        state_plan = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {exc}")
+
+    if not isinstance(state_plan, dict):
+        raise HTTPException(status_code=400, detail="State plan must be a JSON object")
+
+    _save_plan(state_plan, "state_plan_input")
+    state_plan_json = json.dumps(state_plan)
+
+    # ── Step 1: Send state plan to Kirk for planning ──────────────────────────
+    log.info("Sending state plan to kirk for planning")
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            resp = await client.post(
+                f"http://127.0.0.1:{KIRK_SERVE_PORT}/plan-from-state-plan",
+                content=state_plan_json.encode(),
+                headers={"Content-Type": "application/json"},
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"Kirk planning server unreachable: {exc}")
+
+    if resp.status_code == 422:
+        log.error("Kirk planning failed (422) for state plan:\n%s", resp.text)
+        raise HTTPException(status_code=422, detail="No feasible plan found for the given state plan")
+    if resp.status_code != 200:
+        log.error("Kirk planning error (%s) for state plan:\n%s", resp.status_code, resp.text)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Kirk planning server error ({resp.status_code}): {resp.text}",
+        )
+
+    try:
+        plan_payload = resp.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Kirk returned non-JSON response")
+
+    log.info("Plan received from kirk")
+    _save_plan(plan_payload, "state_plan")
+
+    # ── Step 2: Initialize causal link monitor, oracle & plan visualization ────
+    await _initialize_monitor(plan_payload)
+    await _load_oracle_plan(plan_payload)
+    await _load_plan_visualization(plan_payload)
+
+    # ── Step 3: Dispatch plan via pykirk dispatcher ───────────────────────────
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            dispatch_resp = await client.post(
+                f"http://127.0.0.1:{DISPATCHER_PORT}/plans",
+                json=plan_payload,
+                headers={"Content-Type": "application/json"},
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"PyKirk dispatcher unreachable: {exc}")
+
+    if dispatch_resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"PyKirk dispatcher error ({dispatch_resp.status_code}): {dispatch_resp.text}",
+        )
+
+    log.info("State plan dispatched successfully")
+    return JSONResponse(
+        status_code=202,
+        content={"status": "dispatched", "detail": dispatch_resp.json()},
+    )
+
+
 @app.get("/health")
 async def health():
     """Check liveness of this server and its downstream services."""

@@ -109,18 +109,45 @@ class EaaSBridgeNode(Node):
     # ── Outbound: telemetry WS → ROS topic ────────────────────────────────
 
     def _publish_event(self, raw_json: str):
-        """Publish a telemetry event to the ROS topic."""
-        msg = String()
-        msg.data = raw_json
-        self._event_pub.publish(msg)
+        """Publish a telemetry event to the ROS topic.
 
+        Command and execution telemetry messages originating from the
+        dispatcher carry ``activity_name`` and ``activity_args`` fields
+        when the event corresponds to an episode in the plan.  Those
+        fields are forwarded verbatim in the published JSON so downstream
+        ROS subscribers can read the named arguments.
+        """
         try:
             payload = json.loads(raw_json)
-            event_name = payload.get("data", {}).get("event", "?")
-            verb = payload.get("data", {}).get("verb", "?")
-            self.get_logger().info(f"Published event: {event_name} (verb={verb})")
         except json.JSONDecodeError:
+            msg = String()
+            msg.data = raw_json
+            self._event_pub.publish(msg)
             self.get_logger().debug("Published raw event (non-JSON)")
+            return
+
+        data = payload.get("data", {}) or {}
+        event_name = data.get("event", "?")
+        verb = data.get("verb", "?")
+        activity_name = data.get("activity_name")
+        activity_args = data.get("activity_args") or []
+
+        msg = String()
+        msg.data = json.dumps(payload)
+        self._event_pub.publish(msg)
+
+        if activity_name:
+            arg_summary = ", ".join(
+                f"{a.get('name')}={a.get('value')}" for a in activity_args
+            )
+            self.get_logger().info(
+                f"Published event: {event_name} (verb={verb}, "
+                f"activity={activity_name}({arg_summary}))"
+            )
+        else:
+            self.get_logger().info(
+                f"Published event: {event_name} (verb={verb})"
+            )
 
     # ── Inbound: ROS topic → dispatcher HTTP ──────────────────────────────
 
