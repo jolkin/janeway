@@ -36,7 +36,12 @@ RUN wget -q https://common-lisp.net/project/asdf/archives/asdf.tar.gz \
 
 # ── Configure ASDF source registry ────────────────────────────────────────────
 # Points at /common-lisp so ASDF finds every .asd file in the enterprise tree.
+# claw-cplex and cplex-cffi are excluded because their generated bindings
+# require IBM CPLEX headers (which aren't shipped in this image); kirk-v2
+# doesn't need them and num-opt gates CPLEX behind the :cplex feature flag.
 RUN mkdir -p /root/.config/common-lisp/source-registry.conf.d \
+    && printf '(:exclude "claw-cplex" "cplex-cffi")\n' \
+       > /root/.config/common-lisp/source-registry.conf.d/20-excludes.conf \
     && printf '(:tree "/common-lisp")\n' \
        > /root/.config/common-lisp/source-registry.conf.d/30-root.conf
 
