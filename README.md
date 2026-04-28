@@ -2,6 +2,39 @@
 
 A Docker container that exposes an HTTP API for executing plans end-to-end. It supports three input formats: RMPL programs (native Kirk format), PDDL domain/problem/plan triples (converted via [pddl_to_sp](pddl_to_sp/)), and raw state plan JSON (fed straight to Kirk). In all cases, planning runs through [Kirk](enterprise/kirk-v2/) and dispatch runs through [PyKirk](pykirk/).
 
+## Building
+
+This project uses git submodules. After cloning the repository, run the following command to initialize submodules:
+
+```bash
+# Initialize submodules:
+git submodule update --init 
+```
+
+To build the image run the following line:
+
+```bash
+# Build (from the repo root)
+docker build -t eaas .
+```
+
+## Quick Start
+
+```bash
+docker run --rm -p 8000:8000 -p 9004:9004 eaas
+```
+
+The server is ready when you see all internal services report as ready in the logs. The plan visualization is always available at `http://localhost:9004`.
+
+To then submit a PDDL plan to Janeway, run:
+
+```bash
+curl -X POST http://localhost:8000/execute-pddl \
+     -F "domain=@my_domain.pddl" \
+     -F "problem=@my_problem.pddl" \
+     -F "plan=my_pddl_plan_raw_text"
+```
+
 ## Architecture
 
 ```
@@ -61,21 +94,7 @@ On container startup, `server.py` launches all internal services and waits for t
 
 In all paths, the generated plan JSON is saved to `generated_plans/` and loaded into the plan visualization server.
 
-## Building
-
-This project uses git submodules. After cloning the repository, run the following command to initialize submodules:
-
-```bash
-# Initialize submodules:
-git submodule update --init 
-```
-
-To build the image run the following line:
-
-```bash
-# Build (from the repo root)
-docker build -t eaas .
-```
+## Build Details
 
 This triggers a two-stage build.
 
@@ -96,13 +115,7 @@ This triggers a two-stage build.
 5. Installs the FastAPI wrapper dependencies.
 6. Sets the entrypoint to `start.sh`, which launches `uvicorn server:app`.
 
-## Running
 
-```bash
-docker run --rm -p 8000:8000 -p 9004:9004 eaas
-```
-
-The server is ready when you see all internal services report as ready in the logs. The plan visualization is always available at `http://localhost:9004`.
 
 ### Generated plans
 
