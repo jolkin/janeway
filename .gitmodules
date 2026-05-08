@@ -10,3 +10,6 @@
 [submodule "robust-execution"]
 	path = robust-execution
 	url = https://git.mers.csail.mit.edu/enterprise/robust-execution
+[submodule "MPCScotty"]
+	path = MPCScotty
+	url = https://git.mers.csail.mit.edu/planners/MPCScotty.git
