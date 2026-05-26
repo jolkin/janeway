@@ -187,14 +187,26 @@ def _build_graph(plan_data: dict, exec_times: dict[str, float]) -> dict:
             "hasCausalLink": has_causal,
         })
 
-    # Add episode duration constraints (startEvent → endEvent) as edges.
-    # These are implicit temporal constraints not listed in plan.constraints.
-    seen_edges = {(e["source"], e["target"]) for e in edges}
+    # Mark episode duration constraints (startEvent → endEvent).  Kirk emits
+    # the duration of every durative action as an explicit `simpleTemporal`
+    # constraint from start to end (so it shows up in `plan.constraints`),
+    # while non-explicit durations only live on the episode's `duration`
+    # field.  We want both shapes to render with episode styling, so:
+    #   1. If the constraint edge already exists, upgrade it in place
+    #      (set isEpisode=True, replace bounds with the episode's duration
+    #      so the label matches the episode rather than the constraint).
+    #   2. Otherwise, add a fresh episode edge.
+    edges_by_pair = {(e["source"], e["target"]): e for e in edges}
     for ep in plan.goalEpisodes:
         pair = (ep.startEvent, ep.endEvent)
-        if pair not in seen_edges:
-            seen_edges.add(pair)
-            edges.append({
+        existing = edges_by_pair.get(pair)
+        if existing is not None:
+            existing["isEpisode"] = True
+            existing["id"] = f"episode_{ep.id}"
+            existing["lb"] = _format_bound(ep.duration.lowerBound)
+            existing["ub"] = _format_bound(ep.duration.upperBound)
+        else:
+            new_edge = {
                 "id": f"episode_{ep.id}",
                 "source": ep.startEvent,
                 "target": ep.endEvent,
@@ -203,7 +215,9 @@ def _build_graph(plan_data: dict, exec_times: dict[str, float]) -> dict:
                 "causalLink": "",
                 "hasCausalLink": False,
                 "isEpisode": True,
-            })
+            }
+            edges.append(new_edge)
+            edges_by_pair[pair] = new_edge
 
     # Compute timeline end from normalized execution times
     node_times = [n["executionTime"] for n in nodes if n["executionTime"] is not None]

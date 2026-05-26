@@ -48,7 +48,10 @@ Client
   │    pddl_to_sp  (Python, in-process)
   │    Converts PDDL inputs to a state plan JSON.
   │
-  └── POST /execute-state-plan (raw state plan JSON, bypasses pddl_to_sp)
+  ├── POST /execute-state-plan (raw state plan JSON, bypasses pddl_to_sp)
+  │
+  └── POST /resume             (continuation of an in-progress mission;
+                                preserves the monitor's observed state)
               │
               ▼
 server.py  (FastAPI, port 8000)
@@ -59,9 +62,14 @@ server.py  (FastAPI, port 8000)
   │     POST /plan-from-state-plan — accepts state plan JSON, runs the Kirk planner,
   │                                  returns a new scheduled state plan JSON.
   │
-  ├─► PyKirk dispatcher  (port 9000, internal)
+  ├─► PyKirk dispatcher  (port 9000, internal)  — default dispatch target
   │     Accepts a plan JSON at POST /plans and drives execution
   │     via a local agent (9001) and oracle (9002).
+  │
+  ├─► Magellan / MPCScotty  (port 5000, internal, when ENABLE_MAGELLAN=1)
+  │     Replaces the PyKirk dispatcher when enabled.  Accepts
+  │     POST /planner/start with {goalPlan, exoPlan, model} and runs
+  │     MPC-based motion planning + execution against a YAML model.
   │
   ├─► Causal link monitor  (port 9003, internal)
   │     Monitors causal link integrity during execution.
@@ -94,6 +102,30 @@ On container startup, `server.py` launches all internal services and waits for t
 
 In all paths, the generated plan JSON is saved to `generated_plans/` and loaded into the plan visualization server.
 
+### Magellan dispatch (optional)
+
+Set `ENABLE_MAGELLAN=1` to swap the PyKirk dispatcher for [Magellan / MPCScotty](MPCScotty/) — an MPC-based motion planning and execution service. When enabled:
+
+- A Magellan server is launched as a subprocess on port `MAGELLAN_PORT` (default `5000`).
+- All three execute endpoints route the scheduled state plan to Magellan's `POST /planner/start` instead of PyKirk's `POST /plans`.
+- Each execute request **must** also include a YAML world/dynamics `model` file. Magellan reads this file to ground its motion-planning problem (obstacles, agent dynamics, etc.). The server saves the upload into Magellan's `problems/` directory and references it by filename in the request.
+
+When `ENABLE_MAGELLAN=1` the request shapes change as follows:
+
+| Endpoint | Body |
+|---|---|
+| `POST /execute` | `multipart/form-data` with fields `rmpl` (text or file) and `model` (YAML file) |
+| `POST /execute-pddl` | existing fields (`domain`, `problem`, `plan`) plus `model` (YAML file) |
+| `POST /execute-state-plan` | `multipart/form-data` with fields `state_plan` (JSON file) and `model` (YAML file) |
+
+```bash
+docker run --rm \
+  -p 8000:8000 \
+  -p 9004:9004 \
+  -e ENABLE_MAGELLAN=1 \
+  eaas
+```
+
 ## Build Details
 
 This triggers a two-stage build.
@@ -119,7 +151,7 @@ This triggers a two-stage build.
 
 ### Generated plans
 
-Every plan produced by Kirk is saved to the `generated_plans/` directory inside the container. Mount a volume to persist them on the host:
+Every plan produced by Kirk is saved to the `generated_plans/` directory inside the container, alongside per-service log files for postmortem inspection. Mount a volume to persist both on the host:
 
 ```bash
 docker run --rm \
@@ -128,6 +160,22 @@ docker run --rm \
   -v $(pwd)/plans:/app/generated_plans \
   eaas
 ```
+
+After mounting, the host directory contains:
+
+| File | Description |
+|---|---|
+| `<timestamp>_<source>.json` | Plan JSON snapshots (RMPL/PDDL/state-plan inputs and Kirk outputs) |
+| `janeway.log` | Janeway's own log (the `eaas` logger plus any uvicorn output from the parent process) |
+| `kirk-serve.log` | The Kirk Lisp planning server's stdout/stderr |
+| `dispatcher.log`, `local-agent.log`, `local-oracle.log` | PyKirk component logs |
+| `monitor.log` | Causal-link monitor log |
+| `plan-visualization.log` | Plan-vis server log |
+| `telemetry.log` | Telemetry server log (when started) |
+| `visualization.log` | Vite dev server log (`ENABLE_VIS=1` only) |
+| `magellan.log` | MPCScotty/Magellan log (`ENABLE_MAGELLAN=1` only) |
+
+All log files are truncated at container start. Use `tail -f plans/<service>.log` on the host to follow a specific service.
 
 ### Plan visualization
 
@@ -156,7 +204,9 @@ Each violation event is a JSON object:
 
 ### Fault simulation
 
-Set `SIMULATE_FAULTS=1` to have the oracle inject causal link violations during execution. When enabled, after posting the correct state update for a causal link, the oracle immediately posts a conflicting (negated) update. This triggers a causal link violation in the monitor, useful for testing monitor robustness and recovery behavior.
+The oracle supports two complementary fault-injection modes.
+
+**1. Blanket negation (`SIMULATE_FAULTS=1`)** — after posting the correct state update for any causal link, the oracle immediately posts a conflicting (negated) update for the same variables. Useful as a quick smoke test of the monitor's violation pipeline.
 
 ```bash
 docker run --rm \
@@ -166,15 +216,42 @@ docker run --rm \
   eaas
 ```
 
+**2. Spec-driven faults (`FAULT_SPEC_FILE=...`)** — pass a YAML (or JSON) file describing exactly which actions should fail, how many times, and what state assignment to inject. The oracle reads the file at startup, and whenever an action whose verb matches a spec executes, it posts the spec's `assignment` to the monitor — up to `times` times. After that the rule is inert.
+
+```yaml
+# faults.yaml
+faults:
+  - action: drive          # matches event names like DRIVE_END_8, drive_3_end
+    times: 2               # fire the fault twice, then stop
+    assignment:
+      rover1.location: "lost"
+  - action: science
+    times: 1
+    assignment:
+      rover1.has_sample: false
+```
+
+Mount the file into the container and point `FAULT_SPEC_FILE` at it:
+
+```bash
+docker run --rm \
+  -p 8000:8000 \
+  -p 9004:9004 \
+  -v $(pwd)/faults.yaml:/app/faults.yaml \
+  -e FAULT_SPEC_FILE=/app/faults.yaml \
+  eaas
+```
+
+The two modes compose: if both are set, an action with a spec uses the spec's assignment; everything else falls back to the negated-causal-link injection.
+
 ### PyKirk visualization
 
-Pass `ENABLE_VIS=1` to also start the telemetry server and the Vite visualization frontend. Both the telemetry port (default `8002`) and the Vite port (default `5173`) must be exposed. Because the visualization runs in the browser, `VIS_WS_URL` must be the WebSocket address that **the browser** can reach — adjust it to match whatever hostname/IP you expose the container on.
+Pass `ENABLE_VIS=1` to also start the telemetry server and the Vite visualization frontend. Only the Vite port (default `5173`) needs to be exposed — the visualization's Vite dev server proxies `/ws` to the in-container telemetry server, so the browser reaches both the page and the WebSocket through the same origin. (Forwarding port `8002` is still supported if you want to connect external WS clients directly.)
 
 ```bash
 # Visualization on localhost (default)
 docker run --rm \
   -p 8000:8000 \
-  -p 8002:8002 \
   -p 5173:5173 \
   -p 9004:9004 \
   -e ENABLE_VIS=1 \
@@ -187,13 +264,13 @@ Open `http://localhost:5173` in a browser once the container is ready.
 # Remote host or custom ports
 docker run --rm \
   -p 8000:8000 \
-  -p 8002:8002 \
   -p 5173:5173 \
   -p 9004:9004 \
   -e ENABLE_VIS=1 \
-  -e VIS_WS_URL=ws://192.168.1.10:8002/ws \
   eaas
 ```
+
+If you'd rather have the browser connect to the telemetry server directly (e.g. when the visualization is served from a CDN/proxy and `/ws` can't be proxied), expose port `8002` and override `VITE_TELEMETRY_WS_URL` at build time, or set `VIS_WS_URL` (kept for backward compatibility) to the explicit ws/wss URL the browser should use.
 
 ### External execution (no oracle)
 
@@ -230,7 +307,12 @@ When `ENABLE_ORACLE=0`:
 | `SERVER_PORT`       | `8000`  | External port for the HTTP API      |
 | `ENABLE_ORACLE`     | `1`     | Set to `0` to disable the local oracle and expose the dispatcher for external execution reports |
 | `ENABLE_VIS`        | `0`     | Set to `1` to enable PyKirk visualization |
+| `ENABLE_MAGELLAN`   | `0`     | Set to `1` to start Magellan/MPCScotty and route plans there instead of PyKirk |
+| `MAGELLAN_PORT`     | `5000`  | Internal port for Magellan (when `ENABLE_MAGELLAN=1`) |
+| `MPCSCOTTY_DIR`     | `/app/MPCScotty` | Path to the MPCScotty source tree |
+| `MAGELLAN_PROBLEMS_DIR` | `${MPCSCOTTY_DIR}/problems` | Where uploaded YAML model files are written |
 | `SIMULATE_FAULTS`   | `0`     | Set to `1` to have the oracle inject causal link violations |
+| `FAULT_SPEC_FILE`   | _(empty)_ | Path (inside the container) to a YAML/JSON file describing per-action fault injections. See the [Fault simulation](#fault-simulation) section for the file format. |
 | `TELEMETRY_PORT`    | `8002`  | Port for the PyKirk telemetry server (vis only) |
 | `VIS_PORT`          | `5173`  | Port for the Vite visualization frontend (vis only) |
 | `VIS_WS_URL`        | `ws://localhost:8002/ws` | WebSocket URL the **browser** uses to reach the telemetry server. Must be publicly reachable. |
@@ -267,11 +349,13 @@ curl -X POST http://localhost:8000/execute \
 
 Submit a PDDL problem for planning and execution. Accepts multipart form data with three fields:
 
-| Field     | Type        | Description                                      |
-|-----------|-------------|--------------------------------------------------|
-| `domain`  | file upload | PDDL domain file (durative actions)              |
-| `problem` | file upload | PDDL problem file (objects, init, goal)          |
-| `plan`    | text field  | Temporal plan — one `START: action(args) [DUR]` line per action |
+| Field       | Type         | Description                                                                                            |
+|-------------|--------------|--------------------------------------------------------------------------------------------------------|
+| `domain`    | file upload  | PDDL domain file (durative actions)                                                                    |
+| `problem`   | file upload  | PDDL problem file (objects, init, goal)                                                                |
+| `plan`      | text field   | Temporal plan — one `START: action(args) [DUR]` line per action. **Either** `plan` **or** `plan_file` is required. |
+| `plan_file` | file upload  | Same temporal plan, uploaded as a file. Convenient for clients that pipe a planner's output to a file. |
+| `model`     | file upload  | (required when `ENABLE_MAGELLAN=1`) YAML world/dynamics model.                                         |
 
 The temporal plan format follows the standard PDDL temporal planner output, e.g.:
 ```
@@ -315,6 +399,41 @@ curl -X POST http://localhost:8000/execute-state-plan \
 2. The JSON is sent to Kirk's `POST /plan-from-state-plan` endpoint, which runs the planner and returns a new scheduled state plan.
 3. The scheduled state plan is dispatched to PyKirk via `POST /plans`.
 
+### `POST /resume`
+
+Continue an in-progress mission with an updated plan. Unlike the `/execute*` endpoints — which always start a *new* mission and reset the causal link monitor to a blank world state — `/resume` keeps the monitor's observed `current_state` across re-initialization. Use it after a fault halt: read the live world state from `GET /state`, hand it to your planner, then POST the resulting state plan here.
+
+**Request body** — same shapes as `/execute-state-plan`:
+- `application/json` — raw state plan JSON, or
+- `multipart/form-data` with a `state_plan` JSON file and (when `ENABLE_MAGELLAN=1`) a `model` YAML file.
+
+**Response** — `202 Accepted` with `{"status": "resumed", ...}` on success.
+
+**Processing steps:**
+1. The incoming state plan is saved to `generated_plans/<timestamp>_resume_input.json`.
+2. The JSON is sent to Kirk's `POST /plan-from-state-plan`.
+3. The causal link monitor is re-initialized via its `POST /resume-state-plan` route, which copies the previous monitor's `current_state.assignments` into the new one.
+4. The plan is dispatched to the active downstream service (PyKirk or Magellan). The dispatcher itself already handles restart via `initialize_rte_data_given_replan`.
+
+```bash
+# Typical resume flow after a fault halt
+curl -X GET  http://localhost:8000/state             > current_state.json
+# ... planner generates a new state plan from current_state.json ...
+curl -X POST http://localhost:8000/resume \
+     -H "Content-Type: application/json" \
+     --data-binary @new_state_plan.json
+```
+
+### `GET /state`
+
+Return the current state of the world as tracked by the causal link monitor. The monitor maintains a running map of state-variable assignments that is updated each time the oracle or the ROS bridge posts an observation. The response is the JSON form of the monitor's `current_state` object; an empty object is returned if no plan has been dispatched yet.
+
+```bash
+curl http://localhost:8000/state
+# {"assignments": {"rover1.location": {"variable": "rover1.location", "value": "science1"},
+#                  "rover1.has_sample": {"variable": "rover1.has_sample", "value": true}}}
+```
+
 ### `GET /health`
 
 Returns the liveness of the server and all internal services.
@@ -326,13 +445,13 @@ curl http://localhost:8000/health
 
 ### `GET /violations`
 
-Server-Sent Events (SSE) stream of causal link violations. The connection stays open and delivers violation events in real time as they are detected by the monitor.
+Server-Sent Events (SSE) stream of plan-execution outcomes — both causal link violations and terminal mission-status notifications. The connection stays open and delivers events in real time. The stream currently emits two payload shapes:
 
 ```bash
 curl -N http://localhost:8000/violations
 ```
 
-Each SSE message contains a JSON payload:
+**Violation event** (when the monitor detects a causal-link conflict):
 ```json
 {
   "timestamp": "2026-03-26T14:30:00.000000+00:00",
@@ -342,6 +461,17 @@ Each SSE message contains a JSON payload:
 ```
 
 The `source` field indicates how the violation was detected: `"state-update"` (from an oracle state post), `"event-observation"` (from an action start/end event), or `"event:<timing>:<name>"` (from telemetry).
+
+**Mission-status event** (when the dispatcher finishes a plan):
+```json
+{
+  "timestamp": "2026-05-26T20:43:36.300000+00:00",
+  "source": "dispatcher:agent_0",
+  "status": "completed"
+}
+```
+
+`status` is `"completed"` when every event in the plan executed and `"fail"` when the dispatcher halted (e.g. due to a violation). Unlike violation events, status events don't trigger a dispatcher halt — they're informational.
 
 ## ROS 2 Bridge
 
