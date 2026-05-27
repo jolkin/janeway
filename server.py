@@ -953,7 +953,16 @@ async def get_state():
         raise HTTPException(status_code=503, detail=f"Monitor unreachable: {exc}")
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=resp.text)
-    return resp.json()
+    state = resp.json()
+    # Log the state served to whoever asked, so the Janeway log captures
+    # every external view-of-the-world query alongside the monitor's own
+    # log line.  Flatten the {variable: {variable, value}} shape into a
+    # plain dict for readability.
+    assignments = state.get("assignments", {}) if isinstance(state, dict) else {}
+    flat = {var: (entry.get("value") if isinstance(entry, dict) else entry)
+            for var, entry in assignments.items()}
+    log.info("State queried via /state (%d assignment(s)): %s", len(flat), flat)
+    return state
 
 
 @app.get("/health")

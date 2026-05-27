@@ -289,6 +289,23 @@ When `ENABLE_ORACLE=0`:
 - The dispatcher binds to `0.0.0.0` instead of `127.0.0.1`, making its `POST /handle_execution` endpoint reachable from outside the container.
 - You must publish port `9000` (or your custom `DISPATCHER_PORT`) so external systems can send execution reports.
 
+#### Visualization as the oracle (drone scenario)
+
+When `ENABLE_VIS=1` is paired with `ENABLE_MAGELLAN=0` and the active scene in `scene-config.json` is `drone`, the in-browser visualization itself can stand in for the local oracle. Each time the drone visually completes an action in the scene, the visualization:
+
+1. POSTs an execution report for the corresponding `*_end` event to the dispatcher (via Vite's `/dispatcher` proxy), so the dispatch cycle advances based on what the user actually sees rather than the planner's nominal timing.
+2. POSTs the action's effect to the causal-link monitor (via the `/monitor` proxy), so monitor state and visualization state stay aligned.
+
+This lets you run the drone scenario with `ENABLE_ORACLE=0` and still get a fully advancing mission — no separate oracle process, no ROS bridge required. The mappings are:
+
+| Verb     | Monitor state update                                                                        |
+|----------|---------------------------------------------------------------------------------------------|
+| `fly`    | `DRONE1.DRONE-AT = <"to" arg>`                                                              |
+| `scoop`  | `DRONE1.HAS-WATER = true`,  `DRONE1.TANK-EMPTY = false`                                     |
+| `deliver`| `DRONE1.HAS-WATER = false`, `DRONE1.TANK-EMPTY = true`, `HOUSEN.FIRE = false`, `HOUSEN.EXTINGUISHED = true` |
+
+The two manual fault buttons in the bottom-right of the visualization remain available and post separately to the monitor.
+
 ### Environment variables
 
 | Variable            | Default | Description                         |
