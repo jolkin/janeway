@@ -54,18 +54,12 @@ MONITOR_PORT = int(os.environ.get("MONITOR_PORT", "9003"))
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "8000"))
 ENABLE_ORACLE = os.environ.get("ENABLE_ORACLE", "1").strip() not in ("0", "", "false", "False")
 ENABLE_VIS = os.environ.get("ENABLE_VIS", "0").strip() not in ("0", "", "false", "False")
-ENABLE_MAGELLAN = os.environ.get("ENABLE_MAGELLAN", "0").strip() not in ("0", "", "false", "False")
 SIMULATE_FAULTS = os.environ.get("SIMULATE_FAULTS", "0")
 FAULT_SPEC_FILE = os.environ.get("FAULT_SPEC_FILE", "")
 TELEMETRY_PORT = int(os.environ.get("TELEMETRY_PORT", "8002"))
 VIS_PORT = int(os.environ.get("VIS_PORT", "5173"))
 PLAN_VIS_PORT = int(os.environ.get("PLAN_VIS_PORT", "9004"))
 PLAN_VIS_DIR = os.environ.get("PLAN_VIS_DIR", str(Path(__file__).parent / "plan_visualization"))
-MAGELLAN_PORT = int(os.environ.get("MAGELLAN_PORT", "5000"))
-MPCSCOTTY_DIR = os.environ.get("MPCSCOTTY_DIR", str(Path(__file__).parent / "MPCScotty"))
-MAGELLAN_PROBLEMS_DIR = os.environ.get(
-    "MAGELLAN_PROBLEMS_DIR", str(Path(MPCSCOTTY_DIR) / "problems")
-)
 # Public WebSocket URL used by the browser to reach the telemetry server.
 # Must be reachable from the client machine, not from inside the container.
 VIS_WS_URL = os.environ.get("VIS_WS_URL", f"ws://localhost:{TELEMETRY_PORT}/ws")
@@ -226,19 +220,6 @@ async def lifespan(app: FastAPI):
         name="plan-visualization",
     )
 
-    # ── Magellan motion-planning service (optional) ──────────────────────
-    if ENABLE_MAGELLAN:
-        log.info("Magellan enabled — starting MPCScotty server")
-        Path(MAGELLAN_PROBLEMS_DIR).mkdir(parents=True, exist_ok=True)
-        _start_process(
-            ["python", "magellan/server.py",
-             "-host", "127.0.0.1",
-             "-port", str(MAGELLAN_PORT)],
-            cwd=MPCSCOTTY_DIR,
-            env=base_env,
-            name="magellan",
-        )
-
     # ── Visualization frontend (optional) ────────────────────────────────
     if ENABLE_VIS:
         log.info("Visualization enabled — starting Vite dev server")
@@ -266,8 +247,6 @@ async def lifespan(app: FastAPI):
         checks.append((f"http://127.0.0.1:{TELEMETRY_PORT}/docs", "telemetry"))
     if ENABLE_VIS:
         checks.append((f"http://127.0.0.1:{VIS_PORT}/", "visualization"))
-    if ENABLE_MAGELLAN:
-        checks.append((f"http://127.0.0.1:{MAGELLAN_PORT}/", "magellan"))
     for url, name in checks:
         ready = await wait_for_http(url, timeout=120.0)
         if ready:
@@ -366,85 +345,17 @@ async def _initialize_monitor(plan_payload: dict, resume: bool = False):
         log.warning("Could not reach causal link monitor: %s", exc)
 
 
-def _save_magellan_model(model_yaml: str | bytes) -> str:
-    """Persist a YAML model into Magellan's problems/ directory and return the
-    filename Magellan should reference (relative to that directory)."""
-    Path(MAGELLAN_PROBLEMS_DIR).mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"model_{timestamp}.yaml"
-    path = Path(MAGELLAN_PROBLEMS_DIR) / filename
-    if isinstance(model_yaml, bytes):
-        path.write_bytes(model_yaml)
-    else:
-        path.write_text(model_yaml)
-    log.info("Wrote Magellan model to %s", path)
-    return filename
-
-
-async def _read_model_yaml(model: UploadFile | None) -> str:
-    if model is None:
-        raise HTTPException(
-            status_code=400,
-            detail="ENABLE_MAGELLAN=1: a YAML 'model' file is required for execution.",
-        )
-    raw = await model.read()
-    if not raw:
-        raise HTTPException(status_code=400, detail="Uploaded model file is empty.")
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Model file is not valid UTF-8: {exc}")
-
-
 async def _dispatch_plan(
     plan_payload: dict,
-    model_yaml: str | None,
     reset_dispatch_state: bool = False,
 ) -> dict:
-    """Send a scheduled state plan to the active downstream service.
+    """Send a scheduled state plan to the PyKirk dispatcher.
 
-    When ENABLE_MAGELLAN=1, the plan is forwarded to Magellan's
-    POST /planner/start endpoint with the supplied YAML model; otherwise it is
-    forwarded to PyKirk's POST /plans endpoint.  When ``reset_dispatch_state``
-    is True (used by ``/resume``), the PyKirk request includes a
-    ``reset_dispatch_state=true`` query parameter that tells the dispatcher to
-    discard its prior bookkeeping before initializing against the new plan.
-    Returns the parsed JSON response from whichever service was invoked.
+    When ``reset_dispatch_state`` is True (used by ``/resume``), the request
+    includes a ``reset_dispatch_state=true`` query parameter that tells the
+    dispatcher to discard its prior bookkeeping before initializing against
+    the new plan.  Returns the parsed JSON response.
     """
-    if ENABLE_MAGELLAN:
-        if model_yaml is None:
-            raise HTTPException(
-                status_code=400,
-                detail="ENABLE_MAGELLAN=1: a YAML 'model' file is required.",
-            )
-        model_filename = _save_magellan_model(model_yaml)
-        magellan_payload = {
-            "goalPlan": plan_payload,
-            "exoPlan": None,
-            "model": model_filename,
-        }
-        url = f"http://127.0.0.1:{MAGELLAN_PORT}/planner/start"
-        log.info("Dispatching plan to Magellan at %s (model=%s)", url, model_filename)
-        try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                resp = await client.post(
-                    url,
-                    json=magellan_payload,
-                    headers={"Content-Type": "application/json"},
-                )
-        except httpx.RequestError as exc:
-            raise HTTPException(status_code=503, detail=f"Magellan unreachable: {exc}")
-        if resp.status_code != 200:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Magellan error ({resp.status_code}): {resp.text}",
-            )
-        try:
-            return resp.json()
-        except Exception:
-            # Magellan may return a raw plan string; surface it as-is.
-            return {"plan": resp.text}
-
     url = f"http://127.0.0.1:{DISPATCHER_PORT}/plans"
     params = {"reset_dispatch_state": "true"} if reset_dispatch_state else None
     try:
@@ -482,44 +393,23 @@ async def execute(request: Request):
 
     Request body:
       • Raw RMPL program text (Content-Type: text/plain), or
-      • JSON with an \"rmpl\" field (Content-Type: application/json), or
-      • multipart/form-data with an \"rmpl\" field (text or file) and, when
-        ENABLE_MAGELLAN=1, a \"model\" YAML file.
+      • JSON with an \"rmpl\" field (Content-Type: application/json).
 
     Optional header:
       X-Package-Name: RMPL package name to plan (default: main)
     """
     content_type = request.headers.get("content-type", "")
-    model_yaml: str | None = None
     if "application/json" in content_type:
         body = await request.json()
         if isinstance(body, dict) and "rmpl" in body:
             rmpl_text = body["rmpl"]
         else:
             raise HTTPException(status_code=400, detail="JSON body must contain an 'rmpl' key")
-    elif "multipart/form-data" in content_type:
-        form = await request.form()
-        rmpl_field = form.get("rmpl")
-        if rmpl_field is None:
-            raise HTTPException(status_code=400, detail="multipart body must contain an 'rmpl' field")
-        if isinstance(rmpl_field, UploadFile):
-            rmpl_text = (await rmpl_field.read()).decode("utf-8")
-        else:
-            rmpl_text = str(rmpl_field)
-        model_field = form.get("model")
-        if isinstance(model_field, UploadFile):
-            model_yaml = await _read_model_yaml(model_field)
     else:
         raw = await request.body()
         if not raw:
             raise HTTPException(status_code=400, detail="Request body must contain an RMPL program")
         rmpl_text = raw.decode("utf-8")
-
-    if ENABLE_MAGELLAN and model_yaml is None:
-        raise HTTPException(
-            status_code=400,
-            detail="ENABLE_MAGELLAN=1: send /execute as multipart/form-data with a 'model' YAML file.",
-        )
 
     package_name = request.headers.get("x-package-name", "main")
 
@@ -561,14 +451,13 @@ async def execute(request: Request):
     await _load_oracle_plan(plan_payload)
     await _load_plan_visualization(plan_payload)
 
-    # ── Step 3: Dispatch plan to active downstream service ────────────────
-    detail = await _dispatch_plan(plan_payload, model_yaml)
-    log.info("Plan dispatched successfully (%s)", "magellan" if ENABLE_MAGELLAN else "pykirk")
+    # ── Step 3: Dispatch plan to PyKirk ──────────────────────────────────
+    detail = await _dispatch_plan(plan_payload)
+    log.info("Plan dispatched successfully")
     return JSONResponse(
         status_code=202,
         content={
             "status": "dispatched",
-            "target": "magellan" if ENABLE_MAGELLAN else "pykirk",
             "detail": detail,
         },
     )
@@ -580,7 +469,6 @@ async def execute_pddl(
     problem: UploadFile = File(..., description="PDDL problem file"),
     plan: Optional[str] = Form(None, description="Temporal PDDL plan as plain text"),
     plan_file: Optional[UploadFile] = File(None, description="Temporal PDDL plan as a file upload"),
-    model: Optional[UploadFile] = File(None, description="(Magellan only) YAML world/dynamics model"),
 ):
     """
     Accept a PDDL domain, problem, and temporal plan; convert to a state plan
@@ -594,8 +482,6 @@ async def execute_pddl(
       plan_file  – same temporal plan, uploaded as a file. Useful for clients
                    that pipe planner output without inlining it as a form
                    string.
-      model      – (required when ENABLE_MAGELLAN=1) YAML model file describing
-                   the world/dynamics for Magellan motion planning
     """
     if plan is None and plan_file is None:
         raise HTTPException(
@@ -607,8 +493,6 @@ async def execute_pddl(
         )
     if plan is None:
         plan = (await plan_file.read()).decode("utf-8")
-
-    model_yaml = await _read_model_yaml(model) if ENABLE_MAGELLAN else None
 
     domain_text = (await domain.read()).decode("utf-8")
     problem_text = (await problem.read()).decode("utf-8")
@@ -688,14 +572,13 @@ async def execute_pddl(
     await _load_oracle_plan(plan_payload)
     await _load_plan_visualization(plan_payload)
 
-    # ── Step 4: Dispatch plan to active downstream service ──────────────────
-    detail = await _dispatch_plan(plan_payload, model_yaml)
-    log.info("PDDL plan dispatched successfully (%s)", "magellan" if ENABLE_MAGELLAN else "pykirk")
+    # ── Step 4: Dispatch plan to PyKirk ──────────────────────────────────
+    detail = await _dispatch_plan(plan_payload)
+    log.info("PDDL plan dispatched successfully")
     return JSONResponse(
         status_code=202,
         content={
             "status": "dispatched",
-            "target": "magellan" if ENABLE_MAGELLAN else "pykirk",
             "detail": detail,
         },
     )
@@ -709,57 +592,21 @@ async def execute_state_plan(request: Request):
     planning, and continue through the usual downstream pipeline (monitor
     initialization, oracle load, visualization, dispatch).
 
-    Request body:
-      • application/json — raw state plan JSON, or
-      • multipart/form-data with a 'state_plan' file (JSON) and, when
-        ENABLE_MAGELLAN=1, a 'model' YAML file describing the world/dynamics.
+    Request body must be application/json — a raw state plan JSON object.
     """
     content_type = request.headers.get("content-type", "")
-    model_yaml: str | None = None
-    if "application/json" in content_type:
-        try:
-            state_plan = await request.json()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid JSON body: {exc}")
-    elif "multipart/form-data" in content_type:
-        form = await request.form()
-        state_plan_field = form.get("state_plan")
-        if state_plan_field is None:
-            raise HTTPException(
-                status_code=400,
-                detail="multipart body must contain a 'state_plan' field (JSON file or text)",
-            )
-        if isinstance(state_plan_field, UploadFile):
-            raw = await state_plan_field.read()
-        else:
-            raw = str(state_plan_field).encode("utf-8")
-        try:
-            state_plan = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail=f"state_plan is not valid JSON: {exc}")
-        model_field = form.get("model")
-        if isinstance(model_field, UploadFile):
-            model_yaml = await _read_model_yaml(model_field)
-    else:
+    if "application/json" not in content_type:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Request must be application/json or multipart/form-data "
-                "(with 'state_plan' and, when ENABLE_MAGELLAN=1, 'model')"
-            ),
+            detail="Request must be application/json (raw state plan JSON)",
         )
+    try:
+        state_plan = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {exc}")
 
     if not isinstance(state_plan, dict):
         raise HTTPException(status_code=400, detail="State plan must be a JSON object")
-
-    if ENABLE_MAGELLAN and model_yaml is None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "ENABLE_MAGELLAN=1: send /execute-state-plan as multipart/form-data "
-                "with a 'state_plan' JSON file and a 'model' YAML file."
-            ),
-        )
 
     _save_plan(state_plan, "state_plan_input")
     state_plan_json = json.dumps(state_plan)
@@ -799,14 +646,13 @@ async def execute_state_plan(request: Request):
     await _load_oracle_plan(plan_payload)
     await _load_plan_visualization(plan_payload)
 
-    # ── Step 3: Dispatch plan to active downstream service ──────────────────
-    detail = await _dispatch_plan(plan_payload, model_yaml)
-    log.info("State plan dispatched successfully (%s)", "magellan" if ENABLE_MAGELLAN else "pykirk")
+    # ── Step 3: Dispatch plan to PyKirk ──────────────────────────────────
+    detail = await _dispatch_plan(plan_payload)
+    log.info("State plan dispatched successfully")
     return JSONResponse(
         status_code=202,
         content={
             "status": "dispatched",
-            "target": "magellan" if ENABLE_MAGELLAN else "pykirk",
             "detail": detail,
         },
     )
@@ -823,10 +669,7 @@ async def resume(request: Request):
     world view.  Use this after a fault halt: query `GET /state` for the live
     world state, generate a new state plan from there, and POST it here.
 
-    Request body:
-      • `application/json` — raw state plan JSON, or
-      • `multipart/form-data` with a `state_plan` JSON file and (when
-        `ENABLE_MAGELLAN=1`) a `model` YAML file.
+    Request body must be application/json — a raw state plan JSON object.
 
     The plan is forwarded to Kirk's `/plan-from-state-plan` like the other
     execute endpoints, but the monitor is initialised via
@@ -834,51 +677,18 @@ async def resume(request: Request):
     already supports restart via `RTEStarDispatcherWithReplanning.put_plan`.
     """
     content_type = request.headers.get("content-type", "")
-    model_yaml: Optional[str] = None
-    if "application/json" in content_type:
-        try:
-            state_plan = await request.json()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid JSON body: {exc}")
-    elif "multipart/form-data" in content_type:
-        form = await request.form()
-        state_plan_field = form.get("state_plan")
-        if state_plan_field is None:
-            raise HTTPException(
-                status_code=400,
-                detail="multipart body must contain a 'state_plan' field (JSON file or text)",
-            )
-        if isinstance(state_plan_field, UploadFile):
-            raw = await state_plan_field.read()
-        else:
-            raw = str(state_plan_field).encode("utf-8")
-        try:
-            state_plan = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail=f"state_plan is not valid JSON: {exc}")
-        model_field = form.get("model")
-        if isinstance(model_field, UploadFile):
-            model_yaml = await _read_model_yaml(model_field)
-    else:
+    if "application/json" not in content_type:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Request must be application/json or multipart/form-data "
-                "(with 'state_plan' and, when ENABLE_MAGELLAN=1, 'model')"
-            ),
+            detail="Request must be application/json (raw state plan JSON)",
         )
+    try:
+        state_plan = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {exc}")
 
     if not isinstance(state_plan, dict):
         raise HTTPException(status_code=400, detail="State plan must be a JSON object")
-
-    if ENABLE_MAGELLAN and model_yaml is None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "ENABLE_MAGELLAN=1: send /resume as multipart/form-data with a "
-                "'state_plan' JSON file and a 'model' YAML file."
-            ),
-        )
 
     _save_plan(state_plan, "resume_input")
     state_plan_json = json.dumps(state_plan)
@@ -924,13 +734,12 @@ async def resume(request: Request):
     # network's namespace and would otherwise filter every event of the new
     # plan out of ``new_controllables`` (see
     # ``initialize_rte_data_given_replan``).
-    detail = await _dispatch_plan(plan_payload, model_yaml, reset_dispatch_state=True)
-    log.info("Mission resumed successfully (%s)", "magellan" if ENABLE_MAGELLAN else "pykirk")
+    detail = await _dispatch_plan(plan_payload, reset_dispatch_state=True)
+    log.info("Mission resumed successfully")
     return JSONResponse(
         status_code=202,
         content={
             "status": "resumed",
-            "target": "magellan" if ENABLE_MAGELLAN else "pykirk",
             "detail": detail,
         },
     )
