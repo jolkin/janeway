@@ -1,12 +1,12 @@
 [submodule "pykirk"]
 	path = pykirk
-	url = git@gitlab.com:mit-mers/enterprise/pykirk-dispatcher.git
+	url = git@github.com:jolkin/pykirk-dispatcher.git
 [submodule "enterprise"]
 	path = enterprise
-	url = git@gitlab.com:mit-mers/enterprise/enterprise.git
+	url = git@github.com:jolkin/enterprise.git
 [submodule "pddl_to_sp"]
 	path = pddl_to_sp
-	url = git@gitlab.com:mit-mers/enterprise/pddl_to_sp.git
+	url = git@github.com:jolkin/pddl_to_sp.git
 [submodule "robust-execution"]
 	path = robust-execution
-	url = git@gitlab.com:mit-mers/enterprise/robust-execution.git
+	url = git@github.com:jolkin/robust-execution.git
