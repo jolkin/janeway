@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Publications — Janeway</title>
+  <meta name="description" content="Publications about Janeway as a whole and about its individual modules (Kirk, PyKirk, robust execution, pddl_to_sp).">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="brand-mark"></span>Janeway</a>
+    <div class="nav-links">
+      <a href="index.html">Home</a>
+      <a href="documentation.html">Documentation</a>
+      <a href="tutorials.html">Tutorials</a>
+      <a class="active" href="publications.html">Publications</a>
+      <a class="external" href="https://github.com/jolkin/janeway" target="_blank" rel="noopener">View on GitHub</a>
+      <a href="contact.html">Contact</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero compact">
+  <div class="hero-inner">
+    <h1>Publications</h1>
+    <p class="tagline">Papers that introduce Janeway as a whole, and papers that describe the individual modules it composes.</p>
+  </div>
+</header>
+
+<div class="page">
+  <main>
+
+    <p class="lead">
+      Use this page as the central index of academic references for Janeway and its constituent
+      submodules. The two top-level sections — <strong>About Janeway</strong> and
+      <strong>By module</strong> — are intended to be edited directly in
+      <code>public/publications.html</code> as new work is published.
+    </p>
+
+    <div class="callout info">
+      <span class="callout-title">How to add a publication</span>
+      Each entry below is a single <code>&lt;li&gt;</code> with three spans —
+      <code>.pub-cite</code>, <code>.pub-venue</code>, and <code>.pub-link</code>. Duplicate any
+      example entry (commented out in the source) and fill in the citation, venue, and link.
+    </div>
+
+    <!-- ─── ABOUT JANEWAY ─── -->
+    <h2 id="about-janeway" class="anchor-h">About Janeway <a class="perma" href="#about-janeway">¶</a></h2>
+    <p>Papers that describe Janeway as an integrated execution service.</p>
+    <div class="empty-state">
+      No publications listed yet.
+      <!--
+        To add one, duplicate this template inside the <ul> below and remove the comment markers:
+
+        <li class="pub">
+          <span class="pub-cite">Last, F. and Other, A. (2026). "Title of paper."</span>
+          <span class="pub-venue">Venue, vol/issue, pp.</span>
+          <span class="pub-link"><a href="https://example.com/paper.pdf">PDF</a></span>
+        </li>
+      -->
+    </div>
+    <ul class="publication-list" id="publications-janeway">
+      <!-- Add publications here -->
+    </ul>
+
+    <!-- ─── BY MODULE ─── -->
+    <h2 id="by-module" class="anchor-h">By module <a class="perma" href="#by-module">¶</a></h2>
+    <p>
+      Each Janeway submodule has its own publication history. List the relevant references under
+      the corresponding module heading.
+    </p>
+
+    <h3 id="kirk" class="anchor-h">Kirk planner <a class="perma" href="#kirk">¶</a></h3>
+    <p>The Common Lisp planning engine under <a href="https://github.com/jolkin/enterprise" target="_blank" rel="noopener">enterprise/kirk-v2/</a>.</p>
+    <div class="empty-state">No publications listed yet.</div>
+    <ul class="publication-list" id="publications-kirk">
+      <!-- Add publications here -->
+    </ul>
+
+    <h3 id="pykirk" class="anchor-h">PyKirk dispatcher <a class="perma" href="#pykirk">¶</a></h3>
+    <p>The Python dispatch layer (<a href="https://github.com/jolkin/pykirk-dispatcher" target="_blank" rel="noopener">pykirk-dispatcher</a>) that drives a scheduled state plan.</p>
+    <div class="empty-state">No publications listed yet.</div>
+    <ul class="publication-list" id="publications-pykirk">
+      <!-- Add publications here -->
+    </ul>
+
+    <h3 id="robust-execution" class="anchor-h">Robust execution / causal-link monitor <a class="perma" href="#robust-execution">¶</a></h3>
+    <p>The monitor (<a href="https://github.com/jolkin/robust-execution" target="_blank" rel="noopener">robust-execution</a>) that tracks causal-link integrity during dispatch.</p>
+    <div class="empty-state">No publications listed yet.</div>
+    <ul class="publication-list" id="publications-robust-execution">
+      <!-- Add publications here -->
+    </ul>
+
+    <h3 id="pddl-to-sp" class="anchor-h">pddl_to_sp <a class="perma" href="#pddl-to-sp">¶</a></h3>
+    <p>The PDDL-to-state-plan converter (<a href="https://github.com/jolkin/pddl_to_sp" target="_blank" rel="noopener">pddl_to_sp</a>).</p>
+    <div class="empty-state">No publications listed yet.</div>
+    <ul class="publication-list" id="publications-pddl-to-sp">
+      <!-- Add publications here -->
+    </ul>
+
+    <h3 id="ros-bridge" class="anchor-h">ROS 2 bridge <a class="perma" href="#ros-bridge">¶</a></h3>
+    <p>The ROS 2 integration node bundled inside <a href="https://github.com/jolkin/janeway/tree/main/ros_bridge" target="_blank" rel="noopener">ros_bridge/</a>.</p>
+    <div class="empty-state">No publications listed yet.</div>
+    <ul class="publication-list" id="publications-ros-bridge">
+      <!-- Add publications here -->
+    </ul>
+
+  </main>
+</div>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div>Janeway is part of the <a href="https://github.com/jolkin" target="_blank" rel="noopener">MIT MERS group</a> tooling.</div>
+    <div><a href="https://github.com/jolkin/janeway" target="_blank" rel="noopener">Source on GitHub</a></div>
+  </div>
+</footer>
+
+</body>
+</html>
