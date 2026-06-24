@@ -8,7 +8,7 @@ This project uses git submodules and is orchestrated with Docker Compose.
 
 ```bash
 git clone --recurse-submodules <repo-url>
-cd execution-as-a-service
+cd janeway
 docker compose up
 ```
 
