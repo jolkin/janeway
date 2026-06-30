@@ -5,18 +5,33 @@
 #     docker compose up
 #
 # builds the image (first run) and starts the headless API on :8000 plus the
-# plan visualization on :9004.  Override behavior by setting the env vars
-# below either on the command line or in a `.env` file next to this one.
+# plan visualization on :9004.  No execution oracle runs by default — submitted
+# plans will be accepted by the API but won't advance until something posts
+# execution reports back to the dispatcher.  Choose one of the scenarios
+# below to provide that source of execution reports.
 #
 # Common scenarios:
 #
-#   Browser visualization (drone scene, etc.)
+#   Headless run with the simulated in-container oracle
+#       ENABLE_ORACLE=1 docker compose up
+#       The local oracle drives the dispatch loop autonomously; submitted
+#       plans advance to completion without any external client.
+#
+#   Browser visualization (drone scene drives the dispatch loop)
 #       ENABLE_VIS=1 docker compose up
-#       Open http://localhost:5173 once the container is ready.
+#       Open http://localhost:5173 once the container is ready.  The
+#       in-browser drone scene acts as the oracle: actions advance as
+#       the drone visually completes them.
 #
 #   External execution (ROS bridge, real robot)
-#       ENABLE_ORACLE=0 docker compose up
-#       Dispatcher becomes reachable on http://localhost:9000.
+#       docker compose up
+#       Dispatcher is reachable on http://localhost:9000 for execution
+#       reports POSTed from outside the container.
+#
+#   NOTE: enabling BOTH the in-container oracle (ENABLE_ORACLE=1) and the
+#   browser visualization (ENABLE_VIS=1) results in two independent sources
+#   of execution reports racing into the dispatcher.  This is occasionally
+#   useful for debugging but is not the supported default.
 #
 #   Inject faults from a YAML spec — see README "Scenarios → Fault injection"
 #   for the file format.  Place the spec next to this file and add a
@@ -42,13 +57,14 @@ services:
       - "8000:8000"   # HTTP API (server.py)
       - "9004:9004"   # plan visualization
       - "5173:5173"   # Vite frontend       — used when ENABLE_VIS=1
-      - "9000:9000"   # PyKirk dispatcher   — used when ENABLE_ORACLE=0
+      - "9000:9000"   # PyKirk dispatcher   — reachable when ENABLE_ORACLE is unset (default) so external systems can post execution reports
     environment:
       ENABLE_VIS: "${ENABLE_VIS:-0}"
-      ENABLE_ORACLE: "${ENABLE_ORACLE:-1}"
+      ENABLE_ORACLE: "${ENABLE_ORACLE:-0}"
       SIMULATE_FAULTS: "${SIMULATE_FAULTS:-0}"
       FAULT_SPEC_FILE: "${FAULT_SPEC_FILE:-}"
       MISSION_STATUS_CALLBACK_URL: "${MISSION_STATUS_CALLBACK_URL:-}"
       VIS_WS_URL: "${VIS_WS_URL:-}"
+      VIS_DRONE_PRESET: "${VIS_DRONE_PRESET:-single}"
     volumes:
       - ./generated_plans:/app/generated_plans

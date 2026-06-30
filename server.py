@@ -52,7 +52,7 @@ PDDL_TO_SP_SRC_DIR = os.environ.get("PDDL_TO_SP_SRC_DIR", f"{PDDL_TO_SP_DIR}/src
 ROBUST_EXEC_DIR = os.environ.get("ROBUST_EXEC_DIR", "/app/robust-execution")
 MONITOR_PORT = int(os.environ.get("MONITOR_PORT", "9003"))
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "8000"))
-ENABLE_ORACLE = os.environ.get("ENABLE_ORACLE", "1").strip() not in ("0", "", "false", "False")
+ENABLE_ORACLE = os.environ.get("ENABLE_ORACLE", "0").strip() not in ("0", "", "false", "False")
 ENABLE_VIS = os.environ.get("ENABLE_VIS", "0").strip() not in ("0", "", "false", "False")
 SIMULATE_FAULTS = os.environ.get("SIMULATE_FAULTS", "0")
 FAULT_SPEC_FILE = os.environ.get("FAULT_SPEC_FILE", "")
@@ -63,6 +63,13 @@ PLAN_VIS_DIR = os.environ.get("PLAN_VIS_DIR", str(Path(__file__).parent / "plan_
 # Public WebSocket URL used by the browser to reach the telemetry server.
 # Must be reachable from the client machine, not from inside the container.
 VIS_WS_URL = os.environ.get("VIS_WS_URL", f"ws://localhost:{TELEMETRY_PORT}/ws")
+# Drone-scene preset selector.  Picks between the `single` (1 drone, 2
+# houses) and `multi` (2 drones, 3 houses) preset defined under
+# scenes.drone.presets in pykirk/visualization/src/config/scene-config.json.
+# Empty string leaves the choice to the JSON's `preset` field (currently
+# `multi`).  Passed through to the Vite dev server as VITE_VIS_DRONE_PRESET
+# so the React app sees it at startup.
+VIS_DRONE_PRESET = os.environ.get("VIS_DRONE_PRESET", "")
 
 # Make pddl_to_sp importable (uses bare imports internally — all of its
 # submodules live under pddl_to_sp/src/ after the recent refactor).
@@ -222,13 +229,19 @@ async def lifespan(app: FastAPI):
 
     # ── Visualization frontend (optional) ────────────────────────────────
     if ENABLE_VIS:
-        log.info("Visualization enabled — starting Vite dev server")
+        log.info(
+            "Visualization enabled — starting Vite dev server "
+            f"(drone preset: {VIS_DRONE_PRESET or '<json default>'})"
+        )
+        vis_env = {**base_env, "VITE_TELEMETRY_WS_URL": VIS_WS_URL}
+        if VIS_DRONE_PRESET:
+            vis_env["VITE_VIS_DRONE_PRESET"] = VIS_DRONE_PRESET
         _start_process(
             ["npm", "run", "dev", "--",
              "--host", "0.0.0.0",
              "--port", str(VIS_PORT)],
             cwd=f"{PYKIRK_DIR}/visualization",
-            env={**base_env, "VITE_TELEMETRY_WS_URL": VIS_WS_URL},
+            env=vis_env,
             name="visualization",
         )
 

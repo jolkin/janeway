@@ -32,23 +32,26 @@ The full API surface — RMPL, PDDL, raw state plan, resume, state query, violat
 
 ## Scenarios
 
-Most users want one of these. Each scenario is enabled by setting an environment variable in front of `docker compose up`, or by creating an `.env` file (see [`.env.example`](.env.example)).
+`docker compose up` alone brings up the HTTP API (`:8000`) and the plan-graph visualization (`:9004`), but **no execution oracle is enabled by default**. Submitted plans will be accepted by the API and will appear in the plan visualization, but they won't advance until something posts execution reports back to the dispatcher. Choose one of the scenarios below to provide that source of execution reports.
+
+Each scenario is enabled by setting an environment variable in front of `docker compose up`, or by creating an `.env` file (see [`.env.example`](.env.example)).
 
 | Scenario | Command | What it adds |
 |---|---|---|
-| Headless API + plan visualization | `docker compose up` | the default — server (`:8000`) + plan vis (`:9004`) |
-| Drone scene in a browser | `ENABLE_VIS=1 docker compose up` | Vite visualization frontend at `:5173` |
-| External execution (ROS / robot) | `ENABLE_ORACLE=0 docker compose up` | disables the local oracle, exposes the dispatcher at `:9000` |
-| Blanket fault injection | `SIMULATE_FAULTS=1 docker compose up` | oracle posts a conflicting state update for every causal link |
+| Headless API + plan visualization (no execution) | `docker compose up` | the default — server (`:8000`) + plan vis (`:9004`); dispatcher accepts plans but waits for external execution reports |
+| Headless run with the in-container oracle | `ENABLE_ORACLE=1 docker compose up` | the simulated oracle drives the dispatch loop autonomously; plans advance to completion without an external client |
+| Drone scene in a browser | `ENABLE_VIS=1 docker compose up` | Vite visualization frontend at `:5173`; the in-browser drone scene acts as the oracle |
+| External execution (ROS / robot) | `docker compose up` | dispatcher is reachable on `:9000` for execution reports posted from outside the container |
+| Blanket fault injection (requires oracle) | `ENABLE_ORACLE=1 SIMULATE_FAULTS=1 docker compose up` | oracle posts a conflicting state update for every causal link |
 | Spec-driven fault injection | see [Fault injection](#fault-injection) | mount a YAML file describing which actions should fail |
 
-Scenarios compose: `ENABLE_VIS=1 ENABLE_ORACLE=0 docker compose up` runs the visualization frontend and routes execution reports from outside the container.
+> **Note:** Setting both `ENABLE_ORACLE=1` and `ENABLE_VIS=1` is supported but unusual — it results in two independent sources of execution reports (the in-container oracle *and* the browser visualization) racing into the dispatcher. Pick one source unless you're specifically debugging the dispatcher's dedup behavior.
 
 ### Browser visualization
 
 Open `http://localhost:5173` once the container is ready. The visualization's Vite dev server proxies `/ws` to the in-container telemetry server, so the browser reaches both the page and the WebSocket through the same origin.
 
-For the **drone scene** specifically, the in-browser visualization also acts as the execution oracle: each time the drone visually completes an action, the visualization POSTs the corresponding `*_end` event to the dispatcher and the action's effect to the causal-link monitor. This lets you run the drone scenario with `ENABLE_ORACLE=0` and still get a fully advancing mission. The mappings are:
+For the **drone scene** specifically, the in-browser visualization also acts as the execution oracle: each time the drone visually completes an action, the visualization POSTs the corresponding `*_end` event to the dispatcher and the action's effect to the causal-link monitor. Because `ENABLE_ORACLE` is off by default, this makes the visualization a self-sufficient drone-scenario harness — `ENABLE_VIS=1 docker compose up` is all you need. The mappings are:
 
 | Verb | Monitor state update |
 |---|---|
@@ -60,7 +63,7 @@ Two manual fault buttons in the visualization remain available and post separate
 
 ### External execution (ROS / real robot)
 
-`ENABLE_ORACLE=0` disables the local oracle and binds the dispatcher to `0.0.0.0` so execution reports can come from outside the container. The [ROS 2 bridge](#ros-2-bridge) is the supported integration; any HTTP client that POSTs to `/handle_execution` will also work.
+By default the in-container oracle is off, so the dispatcher binds to `0.0.0.0:9000` and waits for execution reports from outside the container. The [ROS 2 bridge](#ros-2-bridge) is the supported integration; any HTTP client that POSTs to `/handle_execution` will also work. No environment variables are required for this scenario — just `docker compose up`.
 
 ### Fault injection
 
@@ -101,16 +104,17 @@ If both modes are set, an action listed in the spec uses the spec's assignment; 
 
 ## Configuration
 
-Most users don't need to set anything. The default `docker compose up` already exposes every user-facing port; the scenarios above flip the few user-facing toggles. If you need additional control:
+The default `docker compose up` already exposes every user-facing port. Most users will pick exactly one of `ENABLE_ORACLE`, `ENABLE_VIS`, or an external execution source to drive the dispatch loop; the scenarios above flip those toggles. If you need additional control:
 
 | Variable | Default | When to set it |
 |---|---|---|
-| `ENABLE_VIS` | `0` | `1` to start the Vite visualization frontend at `:5173`. |
-| `ENABLE_ORACLE` | `1` | `0` to disable the local oracle and expose the dispatcher at `:9000` for external execution reports. |
-| `SIMULATE_FAULTS` | `0` | `1` for blanket-negation fault injection from the oracle. |
+| `ENABLE_VIS` | `0` | `1` to start the Vite visualization frontend at `:5173`. The in-browser drone scene then acts as the execution oracle for that scenario. |
+| `ENABLE_ORACLE` | `0` | `1` to enable the in-container simulated oracle that drives the dispatch loop autonomously. Leave unset when execution comes from outside the container (browser visualization or ROS 2 bridge). |
+| `SIMULATE_FAULTS` | `0` | `1` for blanket-negation fault injection from the oracle. Requires `ENABLE_ORACLE=1`. |
 | `FAULT_SPEC_FILE` | _unset_ | Path inside the container to a YAML fault spec. See [Fault injection](#fault-injection). |
 | `MISSION_STATUS_CALLBACK_URL` | _unset_ | URL to POST `{"status": "completed"\|"fail"}` to when a mission terminates. |
 | `VIS_WS_URL` | derived | Override only when the browser can't reach the telemetry WebSocket through the Vite proxy (e.g. behind a CDN). |
+| `VIS_DRONE_PRESET` | _unset_ | `single` (1 drone, 2 houses — matches `examples/pddl/drone_problem.pddl`) or `multi` (2 drones, 3 houses — matches `examples/pddl/drone_problem_multi.pddl`). Unset uses the JSON default (currently `multi`). Requires `ENABLE_VIS=1`. |
 
 All other internal ports, paths, and dev-only flags are baked into the Dockerfile and `server.py` defaults. See [CONTRIBUTING.md](CONTRIBUTING.md) for the advanced surface.
 
@@ -269,7 +273,7 @@ The `source` field indicates how the violation was detected: `"state-update"` (o
 
 ## ROS 2 bridge
 
-The [ros_bridge/](ros_bridge/) package is a standalone ROS 2 node that runs **outside** the Docker container and connects the EaaS dispatch loop to a ROS 2 system. Use it together with `ENABLE_ORACLE=0`.
+The [ros_bridge/](ros_bridge/) package is a standalone ROS 2 node that runs **outside** the Docker container and connects the EaaS dispatch loop to a ROS 2 system. Run Janeway with the default `docker compose up` (no `ENABLE_ORACLE`) so the dispatcher is reachable on `:9000` for the bridge's execution reports.
 
 **Outbound** (container → ROS) — the node connects to the in-container telemetry WebSocket and publishes every dispatch event on `/eaas/events` as a `std_msgs/String` containing JSON.
 
