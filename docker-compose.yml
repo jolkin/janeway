@@ -1,0 +1,54 @@
+# Execution as a Service — Docker Compose configuration.
+#
+# The default invocation
+#
+#     docker compose up
+#
+# builds the image (first run) and starts the headless API on :8000 plus the
+# plan visualization on :9004.  Override behavior by setting the env vars
+# below either on the command line or in a `.env` file next to this one.
+#
+# Common scenarios:
+#
+#   Browser visualization (drone scene, etc.)
+#       ENABLE_VIS=1 docker compose up
+#       Open http://localhost:5173 once the container is ready.
+#
+#   External execution (ROS bridge, real robot)
+#       ENABLE_ORACLE=0 docker compose up
+#       Dispatcher becomes reachable on http://localhost:9000.
+#
+#   Inject faults from a YAML spec — see README "Scenarios → Fault injection"
+#   for the file format.  Place the spec next to this file and add a
+#   `docker-compose.override.yml` containing:
+#       services:
+#         eaas:
+#           volumes:
+#             - ./faults.yaml:/app/faults.yaml:ro
+#           environment:
+#             FAULT_SPEC_FILE: /app/faults.yaml
+#
+# All four user-facing ports (8000, 9004, 5173, 9000) are exposed regardless
+# of scenario.  Ports whose backing service isn't running in a given scenario
+# simply have nothing listening on them; this keeps the YAML simple and
+# avoids juggling per-scenario port lists.
+
+services:
+  eaas:
+    build: .
+    image: eaas
+    container_name: eaas
+    ports:
+      - "8000:8000"   # HTTP API (server.py)
+      - "9004:9004"   # plan visualization
+      - "5173:5173"   # Vite frontend       — used when ENABLE_VIS=1
+      - "9000:9000"   # PyKirk dispatcher   — used when ENABLE_ORACLE=0
+    environment:
+      ENABLE_VIS: "${ENABLE_VIS:-0}"
+      ENABLE_ORACLE: "${ENABLE_ORACLE:-1}"
+      SIMULATE_FAULTS: "${SIMULATE_FAULTS:-0}"
+      FAULT_SPEC_FILE: "${FAULT_SPEC_FILE:-}"
+      MISSION_STATUS_CALLBACK_URL: "${MISSION_STATUS_CALLBACK_URL:-}"
+      VIS_WS_URL: "${VIS_WS_URL:-}"
+    volumes:
+      - ./generated_plans:/app/generated_plans
