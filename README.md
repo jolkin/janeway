@@ -149,6 +149,10 @@ This triggers a two-stage build.
 
 
 
+### Troubleshooting the build
+
+**apt fails with "At least one invalid signature was encountered" / "not signed" in the `clfoundation/sbcl` stage.** This is almost always the Docker Desktop VM's disk being full, not an actual signature problem — the real error (`You don't have enough free space in /var/cache/apt/archives/`) only surfaces when running `apt-get` by hand inside the stage. Check usage with `docker system df`, then reclaim space with `docker system prune` (or grow the VM disk) and rebuild.
+
 ### Generated plans
 
 Every plan produced by Kirk is saved to the `generated_plans/` directory inside the container, alongside per-service log files for postmortem inspection. Mount a volume to persist both on the host:
@@ -286,8 +290,10 @@ docker run --rm \
 
 When `ENABLE_ORACLE=0`:
 - The local oracle service is **not started**.
-- The dispatcher binds to `0.0.0.0` instead of `127.0.0.1`, making its `POST /handle_execution` endpoint reachable from outside the container.
+- External systems drive execution by POSTing reports to the dispatcher's `POST /executions` endpoint (payload `{"executions": [{"event", "execution_time", "is_controllable"}]}`).
 - You must publish port `9000` (or your custom `DISPATCHER_PORT`) so external systems can send execution reports.
+
+The dispatcher (`:9000`) and the causal-link monitor (`:9003`) always bind `0.0.0.0` inside the container regardless of `ENABLE_ORACLE`; whether they are reachable from outside is controlled solely by the published ports in `docker-compose.yml`. Publishing `9003` additionally enables external state updates / fault injection against the monitor without restarting the container.
 
 #### Visualization as the oracle (drone scenario)
 
@@ -496,7 +502,7 @@ The [ros_bridge/](ros_bridge/) package is a standalone ROS 2 node that runs **ou
 
 **Outbound** (container → ROS): the node connects to the telemetry WebSocket inside the container and publishes every dispatch event on the `/eaas/events` ROS topic as a `std_msgs/String` containing JSON.
 
-**Inbound** (ROS → container): the node subscribes to `/eaas/execution_reports`. When a message arrives it is forwarded as an HTTP POST to the dispatcher's `/handle_execution` endpoint so the dispatch cycle can advance based on real-world acknowledgements instead of the simulated oracle.
+**Inbound** (ROS → container): the node subscribes to `/eaas/execution_reports`. When a message arrives it is forwarded as an HTTP POST to the dispatcher's `/executions` endpoint so the dispatch cycle can advance based on real-world acknowledgements instead of the simulated oracle.
 
 ### Installation
 
@@ -533,8 +539,10 @@ ros2 launch ros_bridge bridge.launch.py \
 |---------------------|----------------------------|------------------------------------------|
 | `telemetry_ws_url`  | `ws://localhost:8002/ws`   | Telemetry WebSocket URL (inside the EaaS container) |
 | `dispatcher_url`    | `http://localhost:9000`    | Dispatcher HTTP URL (inside the EaaS container)     |
+| `monitor_url`       | `http://localhost:9003`    | Causal-link monitor HTTP URL (inside the EaaS container) |
 | `event_topic`       | `/eaas/events`             | ROS topic for outbound dispatch events   |
 | `report_topic`      | `/eaas/execution_reports`  | ROS topic for inbound execution reports  |
+| `state_update_topic`| `/eaas/state_updates`      | ROS topic for inbound state updates, forwarded to the monitor's `/observe-state-update` |
 | `reconnect_delay`   | `3.0`                      | Seconds to wait before reconnecting after a WS drop |
 
 ### Sending execution reports from ROS
@@ -549,7 +557,7 @@ Publish a `std_msgs/String` to `/eaas/execution_reports` with a JSON body:
 }
 ```
 
-The bridge will POST this to the dispatcher's `POST /handle_execution` as a `ReportExecutionPayloadDTO`.
+The bridge wraps this flat ROS message into a `ReportExecutionPayloadDTO` (`{"executions": [ ... ]}`) and POSTs it to the dispatcher's `POST /executions`.
 
 ### Listening for dispatch events
 

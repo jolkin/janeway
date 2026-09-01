@@ -28,10 +28,10 @@
 #           environment:
 #             FAULT_SPEC_FILE: /app/faults.yaml
 #
-# All four user-facing ports (8000, 9004, 5173, 9000) are exposed regardless
-# of scenario.  Ports whose backing service isn't running in a given scenario
-# simply have nothing listening on them; this keeps the YAML simple and
-# avoids juggling per-scenario port lists.
+# All user-facing ports (8000, 9004, 5173, 9000, 8002, 9003) are exposed
+# regardless of scenario.  Ports whose backing service isn't running in a
+# given scenario simply have nothing listening on them; this keeps the YAML
+# simple and avoids juggling per-scenario port lists.
 
 services:
   eaas:
@@ -43,6 +43,8 @@ services:
       - "9004:9004"   # plan visualization
       - "5173:5173"   # Vite frontend       — used when ENABLE_VIS=1
       - "9000:9000"   # PyKirk dispatcher   — used when ENABLE_ORACLE=0
+      - "8002:8002"   # telemetry WebSocket — used by the ROS bridge (ENABLE_ORACLE=0) or ENABLE_VIS=1
+      - "9003:9003"   # causal-link monitor — external state updates / fault injection
     environment:
       ENABLE_VIS: "${ENABLE_VIS:-0}"
       ENABLE_ORACLE: "${ENABLE_ORACLE:-1}"

@@ -95,15 +95,17 @@ async def wait_for_http(url: str, timeout: float = 60.0) -> bool:
 _log_files: list = []
 
 
-def _start_process(cmd: list[str], cwd: str | None, env: dict, name: str) -> subprocess.Popen:
+def _start_process(cmd: list[str], cwd: str | None, env: dict, name: str,
+                   append: bool = False) -> subprocess.Popen:
     """Start a subprocess with its stdout/stderr redirected to a per-service
     log file inside ``generated_plans/`` (so the host can read it via the
     same bind mount used for plan JSON).  The file is truncated on each
-    container start; rotation is the operator's responsibility.
+    container start (pass ``append=True`` on a supervised restart to keep
+    the pre-crash log); rotation is the operator's responsibility.
     """
     log_path = GENERATED_PLANS_DIR / f"{name}.log"
     log.info("Starting %s: %s (log -> %s)", name, " ".join(cmd), log_path)
-    log_fh = open(log_path, "w", buffering=1)  # line-buffered
+    log_fh = open(log_path, "a" if append else "w", buffering=1)  # line-buffered
     _log_files.append(log_fh)
     proc = subprocess.Popen(
         cmd,
@@ -124,10 +126,14 @@ async def lifespan(app: FastAPI):
     base_env["GENERATED_PLANS_DIR"] = str(GENERATED_PLANS_DIR)
 
     # ── Kirk planning server ───────────────────────────────────────────────
-    _start_process(
+    # LD_LIBRARY_PATH is scoped to the kirk process only: /app/kirk/ipopt-libs
+    # holds the build image's IPOPT numeric stack (see Dockerfile), which must
+    # not leak into the Python/Node services' library resolution.
+    kirk_env = {**base_env, "LD_LIBRARY_PATH": "/app/kirk/ipopt-libs"}
+    kirk_proc = _start_process(
         [KIRK_BINARY, "serve", "--port", str(KIRK_SERVE_PORT)],
         cwd=None,
-        env=base_env,
+        env=kirk_env,
         name="kirk-serve",
     )
 
@@ -150,13 +156,13 @@ async def lifespan(app: FastAPI):
         "MISSION_STATUS_CALLBACK_URL": f"http://127.0.0.1:{SERVER_PORT}/violations",
     }
 
-    # When the oracle is disabled, external systems (e.g. a ROS bridge) provide
-    # execution reports directly.  Bind the dispatcher to 0.0.0.0 so it is
-    # reachable from outside the container.
-    dispatcher_host = "127.0.0.1" if ENABLE_ORACLE else "0.0.0.0"
-
+    # The dispatcher and monitor always bind 0.0.0.0: in-container binding is
+    # not the exposure boundary — docker compose `ports:` is.  Binding
+    # unconditionally lets external systems (a ROS bridge posting execution
+    # reports, fault injection against the monitor) reach them by simply
+    # publishing the port, without restarting with ENABLE_ORACLE=0.
     services = [
-        ("src.pykirk.dispatch.api.dispatcher.main:app", DISPATCHER_PORT, dispatcher_host, "dispatcher"),
+        ("src.pykirk.dispatch.api.dispatcher.main:app", DISPATCHER_PORT, "0.0.0.0", "dispatcher"),
         ("src.pykirk.dispatch.api.local.agent.main:app", AGENT_PORT, "127.0.0.1", "local-agent"),
     ]
     if ENABLE_ORACLE:
@@ -164,7 +170,7 @@ async def lifespan(app: FastAPI):
             ("src.pykirk.dispatch.api.local.oracle.main:app", ORACLE_PORT, "127.0.0.1", "local-oracle"),
         )
     else:
-        log.info("Oracle disabled — dispatcher bound to 0.0.0.0:%s for external execution reports", DISPATCHER_PORT)
+        log.info("Oracle disabled — external systems provide execution reports on :%s", DISPATCHER_PORT)
 
     for uvicorn_app, port, host, name in services:
         _start_process(
@@ -176,13 +182,12 @@ async def lifespan(app: FastAPI):
         )
 
     # ── Causal link monitor server ─────────────────────────────────────────
-    # When the oracle is disabled, external systems (e.g. a ROS bridge) send
-    # state updates directly, so the monitor must be reachable from outside.
-    monitor_host = "127.0.0.1" if ENABLE_ORACLE else "0.0.0.0"
+    # Always 0.0.0.0 (see the dispatcher note above): external state updates
+    # and fault injection only need a compose port mapping, not a restart.
     _start_process(
         ["uv", "run", "uvicorn",
          "planexecutive.monitor.server.server:app",
-         "--host", monitor_host, "--port", str(MONITOR_PORT)],
+         "--host", "0.0.0.0", "--port", str(MONITOR_PORT)],
         cwd=ROBUST_EXEC_DIR,
         env={
             **base_env,
@@ -275,9 +280,40 @@ async def lifespan(app: FastAPI):
         else:
             log.warning("%s did not become ready at %s within timeout", name, url)
 
+    # ── Kirk supervision ──────────────────────────────────────────────────
+    # Defense-in-depth for issue #2: if the kirk binary ever exits (e.g. an
+    # unhandled condition with the debugger disabled), restart it instead of
+    # answering 503 for every request until the container is restarted.
+    async def _supervise_kirk():
+        nonlocal kirk_proc
+        while True:
+            await asyncio.sleep(2.0)
+            if kirk_proc.poll() is not None:
+                log.error(
+                    "kirk-serve exited with code %s — restarting", kirk_proc.returncode
+                )
+                try:
+                    _processes.remove(kirk_proc)
+                except ValueError:
+                    pass
+                kirk_proc = _start_process(
+                    [KIRK_BINARY, "serve", "--port", str(KIRK_SERVE_PORT)],
+                    cwd=None,
+                    env=kirk_env,
+                    name="kirk-serve",
+                    append=True,
+                )
+                ready = await wait_for_http(
+                    f"http://127.0.0.1:{KIRK_SERVE_PORT}/health", timeout=120.0
+                )
+                log.info("kirk-serve restart %s", "healthy" if ready else "NOT healthy")
+
+    kirk_supervisor = asyncio.create_task(_supervise_kirk())
+
     yield
 
     log.info("Shutting down services...")
+    kirk_supervisor.cancel()
     for proc in _processes:
         proc.terminate()
     for proc in _processes:
@@ -562,7 +598,11 @@ async def execute(request: Request):
     await _load_plan_visualization(plan_payload)
 
     # ── Step 3: Dispatch plan to active downstream service ────────────────
-    detail = await _dispatch_plan(plan_payload, model_yaml)
+    # /execute* starts a NEW mission: reset the dispatcher's state so event
+    # ids overlapping a previous mission aren't filtered out as already-run
+    # (issue #5) and no stale terminal status is replayed (issue #7).
+    # /resume is the only endpoint that continues an existing mission.
+    detail = await _dispatch_plan(plan_payload, model_yaml, reset_dispatch_state=True)
     log.info("Plan dispatched successfully (%s)", "magellan" if ENABLE_MAGELLAN else "pykirk")
     return JSONResponse(
         status_code=202,
@@ -689,7 +729,8 @@ async def execute_pddl(
     await _load_plan_visualization(plan_payload)
 
     # ── Step 4: Dispatch plan to active downstream service ──────────────────
-    detail = await _dispatch_plan(plan_payload, model_yaml)
+    # New mission: reset dispatch state (see /execute).
+    detail = await _dispatch_plan(plan_payload, model_yaml, reset_dispatch_state=True)
     log.info("PDDL plan dispatched successfully (%s)", "magellan" if ENABLE_MAGELLAN else "pykirk")
     return JSONResponse(
         status_code=202,
@@ -800,7 +841,8 @@ async def execute_state_plan(request: Request):
     await _load_plan_visualization(plan_payload)
 
     # ── Step 3: Dispatch plan to active downstream service ──────────────────
-    detail = await _dispatch_plan(plan_payload, model_yaml)
+    # New mission: reset dispatch state (see /execute).
+    detail = await _dispatch_plan(plan_payload, model_yaml, reset_dispatch_state=True)
     log.info("State plan dispatched successfully (%s)", "magellan" if ENABLE_MAGELLAN else "pykirk")
     return JSONResponse(
         status_code=202,

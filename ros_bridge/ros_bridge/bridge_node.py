@@ -10,7 +10,7 @@ Inbound (ROS → container):
     JSON string with the shape:
         {"event": "<event_name>", "execution_time": <float>, "is_controllable": <bool>}
     The node POSTs a ReportExecutionPayloadDTO to the dispatcher's
-    /handle_execution endpoint so the dispatch cycle can advance.
+    /executions endpoint so the dispatch cycle can advance.
 
     Subscribes to /eaas/state_updates.  Each message is expected to be a
     JSON string mapping state variable names to their observed values, e.g.:

@@ -8,14 +8,29 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 FROM clfoundation/sbcl:2.2.4 AS kirk-builder
 
-# System packages needed at build time
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# System packages needed at build time.
+# The bullseye base image's default mirrors are archived; point apt at
+# archive.debian.org (its original bullseye Release is signed by a key already
+# in the base keyring; the Release file is expired, so disable the
+# valid-until check).
+# coinor-libipopt-dev provides libipopt for the :ipopt feature build below
+# (num-opt's IPOPT backend, needed by pSTN chance-constraint risk allocation);
+# build-essential + pkg-config are needed by ipopt-cffi's cffi-grovel step.
+RUN printf 'deb http://archive.debian.org/debian bullseye main\n' > /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
         ca-certificates \
+        coinor-libipopt-dev \
         curl \
+        pkg-config \
         wget \
         git \
         libssl-dev \
         zlib1g-dev \
+    && IPOPT_SO=$(find /usr/lib -name 'libipopt.so.*' -not -type l | head -1) \
+    && ln -sf "$IPOPT_SO" /usr/lib/libipopt.so \
+    && echo "linked /usr/lib/libipopt.so -> $IPOPT_SO" \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /common-lisp
@@ -76,12 +91,33 @@ RUN sbcl --non-interactive \
          --eval "(uiop:quit)"
 
 # ── Build the kirk binary ──────────────────────────────────────────────────────
+# :ipopt compiles num-opt's IPOPT backend + ipopt-cffi + rubato's risk
+# allocation, so num-opt/solvers:ipopt-solver exists (required by the
+# PSTN-CC temporal subsolver for probabilistic plans).
 RUN sbcl --non-interactive \
          --eval "(require :asdf)" \
+         --eval "(pushnew :ipopt *features*)" \
          --eval "(declaim (sb-ext:muffle-conditions style-warning))" \
          --eval "(declaim (optimize (debug 3)))" \
          --eval "(asdf:make :kirk-v2)" \
     && ls -lh /common-lisp/enterprise/build/kirk*
+
+# ── Collect the IPOPT shared-library closure for the runtime image ────────────
+# The runtime base (trixie) ships an MPI-flavored IPOPT whose UCX stack
+# segfaults when dlopened inside the deployed SBCL image, so we ship this
+# build image's (sequential-MUMPS) closure instead.  Only the numeric stack is
+# copied — never glibc/gcc runtime libs, which must come from the runtime OS.
+RUN mkdir -p /ipopt-runtime \
+    && IPOPT_SO=$(find /usr/lib -name 'libipopt.so.*' -not -type l | head -1) \
+    && cp -L "$IPOPT_SO" /ipopt-runtime/ \
+    && for f in $(ldd "$IPOPT_SO" | awk '/=>/ {print $3}'); do \
+         case "$(basename "$f")" in \
+           liblapack*|libblas*|libopenblas*|libdmumps*|libzmumps*|libmumps*|libpord*|libmpiseq*|libmetis*|libscotch*|libesmumps*|libgfortran*|libquadmath*) \
+             cp -L "$f" /ipopt-runtime/ ;; \
+         esac; \
+       done \
+    && ln -s "$(basename "$IPOPT_SO")" /ipopt-runtime/libipopt.so \
+    && ls -l /ipopt-runtime
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -97,7 +133,10 @@ FROM python:3.13-slim AS runtime
 
 # Runtime system packages.
 # libssl / libcrypto are needed because kirk's deploy-op marks them :dont-deploy
-# (they are expected to be present on the host).
+# (they are expected to be present on the host).  libipopt and its numeric
+# stack are copied from the build stage instead (see /app/kirk/ipopt-libs
+# below) — the trixie IPOPT package pulls an MPI/UCX stack that segfaults
+# inside the deployed SBCL image.
 # curl is needed for the NodeSource setup script.
 # nodejs (>=20) is needed to run the Vite visualization dev server.
 # graphviz provides the `dot` binary used by Kirk's tn:dot-visualize to render
@@ -127,6 +166,11 @@ RUN npm install
 
 # ── Copy the kirk binary bundle from stage 1 ──────────────────────────────────
 COPY --from=kirk-builder /common-lisp/enterprise/build/ /app/kirk/
+
+# ── IPOPT numeric stack for kirk (see the runtime-packages note above) ───────
+# server.py launches kirk with LD_LIBRARY_PATH pointing here, so only the kirk
+# process resolves these bullseye libraries; everything else uses the OS stack.
+COPY --from=kirk-builder /ipopt-runtime/ /app/kirk/ipopt-libs/
 
 # ── Install the wrapper server's own dependencies ─────────────────────────────
 RUN pip install --no-cache-dir fastapi "uvicorn[standard]" httpx websockets
