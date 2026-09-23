@@ -470,6 +470,56 @@ curl -X POST http://localhost:8000/execute-state-plan \
 **Processing steps:**
 1. The state plan JSON is saved to `generated_plans/<timestamp>_state_plan_input.json`.
 2. The JSON is sent to Kirk's `POST /plan-from-state-plan` endpoint, which runs the planner and returns a new scheduled state plan.
+
+#### Uncertain durations, chance constraints, choices and negation
+
+`examples/pstn-state-plan-input.json` is a worked example carrying all of these at once. It is a complete, runnable request body.
+
+A **probabilistic duration** goes on an episode in place of `simpleDuration`. It is always contingent, and its `endEvent` must be declared `"uncontrollable": true`, otherwise the plan is rejected. Normal and uniform distributions are supported.
+
+```json
+"duration": { "$id": "DUR_DRIVE",
+              "$type": "probabilisticDistribution",
+              "distribution": { "$type": "normalDistribution",
+                                "mean": 6, "standardDeviation": 1 } }
+```
+
+Give durations an `$id`, and give an activity's goal episode and its value-episode twin the **same** one. Risk allocation is keyed by that name, so twins with different names leave the value episode undischarged and the plan cannot be serialized for dispatch. Durations without an `$id` still decode, which is why the `pddl_to_sp` output keeps working, but plans with probabilistic durations need them.
+
+A **temporal chance constraint** is a top-level array. Kirk requires exactly one when the plan has probabilistic durations, and it applies to every temporal requirement constraint rather than to a named subset.
+
+```json
+"chanceConstraints": [ { "$type": "temporalChanceConstraint",
+                         "$id": "CC1", "failureProbability": 0.1 } ]
+```
+
+An **open choice** is an integer variable with a range, guarding constraints through implication. Kirk assigns it during planning and the emitted plan carries the chosen value.
+
+```json
+{ "$id": "choice0", "$type": "variable",
+  "domain": { "$type": "integerDomain", "ranges": [ { "bounds": [0, 1], "minClosed": true, "maxClosed": true } ] } }
+
+{ "$id": "C_GUARDED", "$type": "constraint",
+  "expression": { "$type": "impliesApplication",
+                  "left":  { "$type": "equalApplication", "left": { "ref": "choice0" }, "right": 0 },
+                  "right": { "$type": "simpleTemporalApplication", "from": { "ref": "START" },
+                             "to": { "ref": "DRIVE_START_1" }, "lowerBound": 1, "upperBound": "Infinity" } } }
+```
+
+**Negation** wraps a single argument under the key `x`:
+
+```json
+{ "$type": "notApplication",
+  "x": { "$type": "equalApplication",
+         "left": { "$type": "stateVarApplication", "stateVar": "rover1.location", "currentTime": true },
+         "right": "site-a" } }
+```
+
+Note that causal-link extraction only recognises equality and implication when deriving preconditions, so a negated precondition decodes and reaches the planner but does not by itself produce a causal link.
+
+Arithmetic uses word-named types, `plusApplication`, `minusApplication` and `timesApplication`, each taking `numbers` except `minus` which takes `number` plus `moreNumbers`. Plans generated before these names existed encode all three as a bare `"Application"` that names no operator; those are rejected with an explanatory error rather than being guessed at, and need regenerating.
+
+Many other odo operators can still be written by the encoder but not read back by the decoder. If you hit one, the error names the type it could not match.
 3. The scheduled state plan is dispatched to PyKirk via `POST /plans`.
 
 ### `POST /resume`
