@@ -377,6 +377,15 @@ curl -X POST http://localhost:8000/execute -H "Content-Type: text/plain" \
      --data-binary @examples/replan-choice.rmpl
 ```
 
+### Probabilistic durations
+
+`examples/replan-probabilistic.rmpl` is the same scenario built from contingent probabilistic durations under a temporal chance constraint, so it plans and replans through the pSTN path with risk allocation. Run it exactly like the scenario above. A replan there drops the episodes that finished, rewrites their duration to the one actually observed, and re-solves the remainder under the chance constraint.
+
+Two limits are worth knowing before relying on it:
+
+- **A running activity's distribution is not conditioned on elapsed time.** When a probabilistic activity is still in flight at replan time, its start is pinned but its duration keeps the distribution as authored, so risk is allocated as though it were starting now. Kirk logs a line naming the episode and the elapsed time whenever this happens.
+- **The risk budget is re-spent in full.** Because finished episodes leave the problem, the single chance constraint is re-allocated across the remaining activities using the whole original `max-prob-violation`. Risk already consumed by the executed prefix is not deducted, so a long mission with many replans is more optimistic than its declared bound.
+
 ### `POST /replan`
 
 Trigger an online replan by hand (same cycle as above). Returns `202` with the replan summary, `422` when no feasible plan exists (the mission is then halted), `409` when nothing can be replanned (mission ended, replanning disabled). `GET /replan` reports the replanning status of the current mission.

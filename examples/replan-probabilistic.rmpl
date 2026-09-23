@@ -1,0 +1,81 @@
+;;;; -*- mode: common-lisp; -*-
+;;;; Online-replanning test program: probabilistic (pSTN) durations.
+;;;;
+;;;; Same shape as replan-choice.rmpl, but every activity has a contingent
+;;;; probabilistic duration and the mission carries a temporal chance
+;;;; constraint, so Kirk plans it through the pSTN path (risk allocation +
+;;;; pstn-cc-dynamic-controllability) instead of plain STNU.
+;;;;
+;;;; The rover drives to site-a, runs an instrument check, then chooses between
+;;;; sampling at site-a and driving on to site-b to sample there.  With
+;;;; examples/replan-faults.yaml the first drive reports the rover at site-b, so
+;;;; the causal link drive -> sample@site-a is violated while `check` is still
+;;;; running.  That makes the replan exercise three things the STNU scenario
+;;;; never reached:
+;;;;
+;;;;   1. a fully executed contingent probabilistic episode (the drive), which
+;;;;      the clamp removes from the problem;
+;;;;   2. a HALF-executed contingent probabilistic episode (the check), whose
+;;;;      start is pinned while its end is still pending;
+;;;;   3. re-solving under the chance constraint with part of the mission
+;;;;      already behind us.
+;;;;
+;;;; Durations are small so the whole mission runs in well under a minute of
+;;;; wall clock; the dispatcher schedules in real seconds.
+;;;;
+;;;;   docker run ... -v $PWD/examples/replan-faults.yaml:/app/faults.yaml:ro \
+;;;;                  -e FAULT_SPEC_FILE=/app/faults.yaml eaas
+;;;;   POST /execute with this file (package name: main)
+
+(defpackage #:main)
+(in-package #:main)
+
+(defclass rover ()
+  ((location
+    :initarg :location
+    :initform "base"
+    :type (member "base" "site-a" "site-b")
+    :accessor location
+    :documentation "Where the rover currently is.")))
+
+(define-control-program drive (rover to)
+  (declare (primitive)
+           (effect (at :end (odo:equal (location rover) to)))
+           (duration (probabilistic :distribution '(normal :mean 6 :stdev 1))
+                     :contingent t)))
+
+;; Instrument check: a gap between the drive and the choice, so the fault on the
+;; drive is observed while this activity is still running.
+(define-control-program check (rover)
+  (declare (primitive)
+           (duration (probabilistic :distribution '(normal :mean 8 :stdev 1))
+                     :contingent t)))
+
+(define-control-program sample (rover at)
+  (declare (primitive)
+           (requires (at :start (odo:equal (location rover) at)))
+           (duration (probabilistic :distribution '(normal :mean 5 :stdev 1))
+                     :contingent t)))
+
+(define-initial-state start-state ()
+  (:objects
+   (rover1 (make-instance 'rover :location "base" :state-space-name "rover1"))))
+
+(define-control-program main (rover)
+  (with-chance-constraint (:max-prob-violation 0.1)
+    (with-temporal-constraint (simple-temporal :lower-bound 0 :upper-bound 60)
+      (sequence (:slack t)
+        (drive rover "site-a")
+        (check rover)
+        ;; Branch order matters: on the pSTN path Kirk's search commits to the
+        ;; LAST option first, so sample@site-a must come last for the initial
+        ;; plan to be the one the fault invalidates.  (The STNU path in
+        ;; replan-choice.rmpl prefers the first option.)
+        (simple-choice
+         (list
+          (sequence (:slack t)
+            (drive rover "site-b")
+            (sample rover "site-b"))
+          (sample rover "site-a")))))))
+
+(define-model test-model "replan-probabilistic.yaml")
