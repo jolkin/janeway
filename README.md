@@ -61,10 +61,15 @@ server.py  (FastAPI, port 8000)
   │     POST /plan                — accepts RMPL text, returns scheduled state plan JSON.
   │     POST /plan-from-state-plan — accepts state plan JSON, runs the Kirk planner,
   │                                  returns a new scheduled state plan JSON.
+  │     POST /replan               — online replanning: re-solves the last mission's
+  │                                  TPN with executed events pinned, committed
+  │                                  choices locked and the observed world state
+  │                                  injected (see "Online replanning").
   │
   ├─► PyKirk dispatcher  (port 9000, internal)  — default dispatch target
   │     Accepts a plan JSON at POST /plans and drives execution
   │     via a local agent (9001) and oracle (9002).
+  │     POST /pause and GET /history support online replanning.
   │
   ├─► Magellan / MPCScotty  (port 5000, internal, when ENABLE_MAGELLAN=1)
   │     Replaces the PyKirk dispatcher when enabled.  Accepts
@@ -250,7 +255,7 @@ The two modes compose: if both are set, an action with a spec uses the spec's as
 
 ### PyKirk visualization
 
-Pass `ENABLE_VIS=1` to also start the telemetry server and the Vite visualization frontend. Only the Vite port (default `5173`) needs to be exposed — the visualization's Vite dev server proxies `/ws` to the in-container telemetry server, so the browser reaches both the page and the WebSocket through the same origin. (Forwarding port `8002` is still supported if you want to connect external WS clients directly.)
+Pass `ENABLE_VIS=1` to also start the Vite visualization frontend (the telemetry server itself always runs: it is how the causal-link monitor learns which events executed). Only the Vite port (default `5173`) needs to be exposed — the visualization's Vite dev server proxies `/ws` to the in-container telemetry server, so the browser reaches both the page and the WebSocket through the same origin. (Forwarding port `8002` is still supported if you want to connect external WS clients directly.)
 
 ```bash
 # Visualization on localhost (default)
@@ -336,9 +341,45 @@ The two manual fault buttons in the bottom-right of the visualization remain ava
 | `MAGELLAN_PROBLEMS_DIR` | `${MPCSCOTTY_DIR}/problems` | Where uploaded YAML model files are written |
 | `SIMULATE_FAULTS`   | `0`     | Set to `1` to have the oracle inject causal link violations |
 | `FAULT_SPEC_FILE`   | _(empty)_ | Path (inside the container) to a YAML/JSON file describing per-action fault injections. See the [Fault simulation](#fault-simulation) section for the file format. |
+| `ENABLE_REPLANNING` | `1`     | Set to `0` to halt the mission on a violation instead of replanning online (see [Online replanning](#online-replanning)) |
+| `MAX_REPLANS`       | `5`     | Maximum number of online replans per mission before the mission is failed |
+| `REPLAN_SETTLE_SECONDS` | `0.5` | Delay between pausing the dispatcher and reading its executed schedule (lets in-flight execution reports land) |
+| `AGENT_MAX_DELAY`   | `0`     | Seconds of random execution delay simulated by the local agent (`>0` exercises temporal violations) |
 | `TELEMETRY_PORT`    | `8002`  | Port for the PyKirk telemetry server (vis only) |
 | `VIS_PORT`          | `5173`  | Port for the Vite visualization frontend (vis only) |
 | `VIS_WS_URL`        | `ws://localhost:8002/ws` | WebSocket URL the **browser** uses to reach the telemetry server. Must be publicly reachable. |
+
+## Online replanning
+
+By default a mission is not abandoned when something goes wrong: Janeway re-solves it around what has already happened and resumes. Two kinds of failure trigger a replan:
+
+- **Causal-link violations** reported by the monitor (an observed state contradicts a condition some future activity relies on).
+- **Temporal infeasibility** reported by the dispatcher (an event executed late enough that the remaining plan can no longer be dispatched consistently). An event that merely breaks its own bound while the rest of the plan stays feasible does not trigger anything; execution continues.
+
+The replan cycle (`server.py`):
+
+1. `POST :9000/pause` — the dispatcher stops dispatching but keeps recording execution reports for events already in flight.
+2. `GET :9000/history` — the executed schedule (`executed` events with times relative to the plan's start event, plus `dispatched`-but-unreported events) and `GET :9003/current-state` — the monitor's view of the world.
+3. `POST :7000/replan` — Kirk re-solves the mission's original TPN (retained in memory from the last `/plan` or `/plan-from-state-plan`) with executed events pinned to their times, every choice whose branch has started locked, constraints entirely in the past dropped, half-executed activities relaxed to what is still possible, and a `REPLAN_NOW_n` event carrying the observed world state ordered before everything that has not started. Decisions that have not been committed are free to change.
+4. The monitor is re-initialized with the new plan (world state preserved, executed events replayed so links produced by past activities are active again), the oracle keeps its history and fault counters, and the plan visualization is reloaded.
+5. `POST :9000/plans` **without** `reset_dispatch_state`: the dispatcher merges the new plan into the running mission (event ids are stable across replans) and resumes.
+
+Every step is published on the `GET /violations` stream (`"status": "replanning"`, `"replanned"`, `"replan-failed"`, and the dispatcher's own `"replan-requested"`). If Kirk finds no feasible plan, the replan budget (`MAX_REPLANS`) is exhausted, or Kirk has been restarted since the mission was planned (its retained TPN is gone), the dispatcher is halted and the mission fails as before. `ENABLE_REPLANNING=0` restores the old halt-on-violation behaviour.
+
+Replanning is available on the RMPL and state-plan paths (not Magellan). Try it with the bundled scenario, whose fault makes the first `drive` end at the wrong site so the plan must switch to the other branch of its choice:
+
+```bash
+docker run --rm -p 8000:8000 -p 9004:9004 \
+  -v $(pwd)/examples/replan-faults.yaml:/app/faults.yaml:ro \
+  -e FAULT_SPEC_FILE=/app/faults.yaml eaas
+curl -N http://localhost:8000/violations &          # watch the replan happen
+curl -X POST http://localhost:8000/execute -H "Content-Type: text/plain" \
+     --data-binary @examples/replan-choice.rmpl
+```
+
+### `POST /replan`
+
+Trigger an online replan by hand (same cycle as above). Returns `202` with the replan summary, `422` when no feasible plan exists (the mission is then halted), `409` when nothing can be replanned (mission ended, replanning disabled). `GET /replan` reports the replanning status of the current mission.
 
 ## API
 

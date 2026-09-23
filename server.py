@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -57,6 +57,17 @@ ENABLE_VIS = os.environ.get("ENABLE_VIS", "0").strip() not in ("0", "", "false",
 ENABLE_MAGELLAN = os.environ.get("ENABLE_MAGELLAN", "0").strip() not in ("0", "", "false", "False")
 SIMULATE_FAULTS = os.environ.get("SIMULATE_FAULTS", "0")
 FAULT_SPEC_FILE = os.environ.get("FAULT_SPEC_FILE", "")
+# Online replanning: on a causal-link violation or a temporal inconsistency,
+# pause the dispatcher, ask Kirk to re-solve the mission's TPN around what has
+# already executed, and resume from the new plan.  When disabled, violations
+# halt the mission as before.
+ENABLE_REPLANNING = os.environ.get("ENABLE_REPLANNING", "1").strip() not in ("0", "", "false", "False")
+MAX_REPLANS = int(os.environ.get("MAX_REPLANS", "5"))
+# Seconds to wait after pausing before reading the executed schedule, so that
+# execution reports already in flight land in the dispatcher's history.
+REPLAN_SETTLE_SECONDS = float(os.environ.get("REPLAN_SETTLE_SECONDS", "0.5"))
+# Seconds of local-agent execution delay to simulate (0 = perfect execution).
+AGENT_MAX_DELAY = os.environ.get("AGENT_MAX_DELAY", "")
 TELEMETRY_PORT = int(os.environ.get("TELEMETRY_PORT", "8002"))
 VIS_PORT = int(os.environ.get("VIS_PORT", "5173"))
 PLAN_VIS_PORT = int(os.environ.get("PLAN_VIS_PORT", "9004"))
@@ -77,6 +88,29 @@ if PDDL_TO_SP_SRC_DIR not in sys.path:
 
 _processes: list[subprocess.Popen] = []
 _violation_subscribers: list[asyncio.Queue] = []
+
+
+class _MissionState:
+    """Per-mission replanning bookkeeping (reset by every /execute*)."""
+
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.replans = 0
+        self.in_progress = False
+        self.pending_reason: dict | None = None
+        self.last_replan: dict | None = None
+        self.model_yaml: str | None = None
+        self.halted = False
+
+    def reset(self, model_yaml: str | None = None):
+        self.replans = 0
+        self.pending_reason = None
+        self.last_replan = None
+        self.model_yaml = model_yaml
+        self.halted = False
+
+
+_mission = _MissionState()
 
 
 async def wait_for_http(url: str, timeout: float = 60.0) -> bool:
@@ -150,10 +184,12 @@ async def lifespan(app: FastAPI):
         "MONITOR_URL": f"http://127.0.0.1:{MONITOR_PORT}",
         "SIMULATE_FAULTS": SIMULATE_FAULTS,
         "FAULT_SPEC_FILE": FAULT_SPEC_FILE,
-        # Dispatcher posts terminal mission-status notifications here so they
-        # flow out through the same /violations SSE stream consumers already
-        # listen to.
+        # Dispatcher posts terminal mission-status notifications (and replan
+        # requests) here so they flow out through the same /violations SSE
+        # stream consumers already listen to.
         "MISSION_STATUS_CALLBACK_URL": f"http://127.0.0.1:{SERVER_PORT}/violations",
+        "ENABLE_REPLANNING": "1" if ENABLE_REPLANNING else "0",
+        "AGENT_MAX_DELAY": AGENT_MAX_DELAY,
     }
 
     # The dispatcher and monitor always bind 0.0.0.0: in-container binding is
@@ -200,16 +236,14 @@ async def lifespan(app: FastAPI):
     )
 
     # ── Telemetry server ──────────────────────────────────────────────────
-    # Start the telemetry server when visualization is enabled OR when the
-    # oracle is disabled (the ROS bridge needs the telemetry WebSocket to
-    # receive dispatch events).
-    if ENABLE_VIS or not ENABLE_ORACLE:
-        reason = []
-        if ENABLE_VIS:
-            reason.append("visualization enabled")
-        if not ENABLE_ORACLE:
-            reason.append("oracle disabled (ROS bridge needs telemetry WS)")
-        log.info("Starting telemetry server — %s", ", ".join(reason))
+    # Always started: the causal-link monitor learns which events have
+    # executed (START consumes a link, END activates one) only through the
+    # telemetry WebSocket, so without it links are never active and no
+    # violation can be detected.  The visualization and the ROS bridge use
+    # the same stream.
+    if True:
+        log.info("Starting telemetry server (monitor event feed%s)",
+                 ", visualization" if ENABLE_VIS else "")
         _start_process(
             ["uv", "run", "uvicorn",
              "src.pykirk.dispatch.api.telemetry.main:app",
@@ -267,8 +301,7 @@ async def lifespan(app: FastAPI):
     ]
     if ENABLE_ORACLE:
         checks.append((f"http://127.0.0.1:{ORACLE_PORT}/docs", "local-oracle"))
-    if ENABLE_VIS or not ENABLE_ORACLE:
-        checks.append((f"http://127.0.0.1:{TELEMETRY_PORT}/docs", "telemetry"))
+    checks.append((f"http://127.0.0.1:{TELEMETRY_PORT}/docs", "telemetry"))
     if ENABLE_VIS:
         checks.append((f"http://127.0.0.1:{VIS_PORT}/", "visualization"))
     if ENABLE_MAGELLAN:
@@ -358,17 +391,22 @@ async def _load_plan_visualization(plan_payload: dict):
         log.warning("Could not reach plan visualization server: %s", exc)
 
 
-async def _load_oracle_plan(plan_payload: dict):
-    """Send the plan to the oracle so it can extract causal links for state updates."""
+async def _load_oracle_plan(plan_payload: dict, resume: bool = False):
+    """Send the plan to the oracle so it can extract causal links for state updates.
+
+    With ``resume=True`` (online replan of the running mission) the oracle keeps
+    its execution history and fault-injection counters.
+    """
     if not ENABLE_ORACLE:
         return
-    log.info("Loading plan into oracle for causal link extraction")
+    log.info("Loading plan into oracle for causal link extraction (resume=%s)", resume)
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"http://127.0.0.1:{ORACLE_PORT}/plan",
                 json=plan_payload,
                 headers={"Content-Type": "application/json"},
+                params={"resume": "true"} if resume else None,
             )
         if resp.status_code == 200:
             log.info("Oracle plan loaded: %s", resp.json())
@@ -378,24 +416,31 @@ async def _load_oracle_plan(plan_payload: dict):
         log.warning("Could not reach oracle: %s", exc)
 
 
-async def _initialize_monitor(plan_payload: dict, resume: bool = False):
+async def _initialize_monitor(
+    plan_payload: dict, resume: bool = False, executed_events: list | None = None
+):
     """Send the plan to the causal link monitor for initialization.
 
     When ``resume`` is True, the monitor preserves its observed
     ``current_state`` across the re-initialization (so a mid-execution
-    continuation keeps the post-fault world view).
+    continuation keeps the post-fault world view).  ``executed_events``
+    (online replanning) are replayed into the new plan so links produced by
+    already-executed events are active again.
     """
     route = "resume-state-plan" if resume else "initialize-state-plan"
     log.info("Initializing causal link monitor (route=%s)", route)
+    body = plan_payload
+    if resume and executed_events:
+        body = {"plan": plan_payload, "executedEvents": executed_events}
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"http://127.0.0.1:{MONITOR_PORT}/{route}",
-                json=plan_payload,
+                json=body,
                 headers={"Content-Type": "application/json"},
             )
         if resp.status_code == 200:
-            log.info("Causal link monitor initialized successfully")
+            log.info("Causal link monitor initialized successfully: %s", resp.text[:300])
         else:
             log.warning("Monitor initialization returned %s: %s", resp.status_code, resp.text)
     except httpx.RequestError as exc:
@@ -483,6 +528,9 @@ async def _dispatch_plan(
 
     url = f"http://127.0.0.1:{DISPATCHER_PORT}/plans"
     params = {"reset_dispatch_state": "true"} if reset_dispatch_state else None
+    if reset_dispatch_state:
+        # A reset is a new mission: restart the replanning budget.
+        _mission.reset(model_yaml)
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             dispatch_resp = await client.post(
@@ -499,6 +547,235 @@ async def _dispatch_plan(
             detail=f"PyKirk dispatcher error ({dispatch_resp.status_code}): {dispatch_resp.text}",
         )
     return dispatch_resp.json()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Online replanning
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+async def _broadcast(payload: dict) -> None:
+    """Fan a payload out to every /violations SSE subscriber."""
+    for queue in list(_violation_subscribers):
+        await queue.put(payload)
+
+
+async def _pause_dispatcher(reason: str) -> bool:
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.post(f"http://127.0.0.1:{DISPATCHER_PORT}/pause", json={"reason": reason})
+    if resp.status_code == 200:
+        return True
+    log.warning("Dispatcher pause returned %s: %s", resp.status_code, resp.text)
+    return False
+
+
+async def _halt_dispatcher(reason: str) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(f"http://127.0.0.1:{DISPATCHER_PORT}/halt", json={"reason": reason})
+            log.warning("Dispatcher halt requested (status=%s)", resp.status_code)
+    except Exception as exc:
+        log.error("Failed to halt dispatcher: %s", exc)
+
+
+async def _get_dispatch_history() -> dict:
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(f"http://127.0.0.1:{DISPATCHER_PORT}/history")
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _get_world_state() -> dict:
+    """Flat {VARIABLE: value} view of the monitor's current state."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(f"http://127.0.0.1:{MONITOR_PORT}/current-state")
+    resp.raise_for_status()
+    assignments = resp.json().get("assignments", {})
+    return {
+        var: (entry.get("value") if isinstance(entry, dict) else entry)
+        for var, entry in assignments.items()
+    }
+
+
+class _ReplanInfeasible(Exception):
+    pass
+
+
+async def _kirk_replan(history: dict, world_state: dict) -> dict:
+    """Ask Kirk to re-solve the mission's TPN clamped to the executed schedule
+    and the observed world state.  Raises _ReplanInfeasible on a 422/409."""
+    body = {
+        "executedEvents": [
+            {"event": e["event"], "time": e["time"]} for e in history.get("executed", [])
+        ],
+        "dispatchedEvents": [
+            {"event": e["event"], "time": e["time"]} for e in history.get("dispatched", [])
+        ],
+        "worldState": world_state,
+        "now": history.get("now", 0.0),
+    }
+    _save_plan(body, "replan_request")
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            resp = await client.post(
+                f"http://127.0.0.1:{KIRK_SERVE_PORT}/replan",
+                json=body,
+                headers={"Content-Type": "application/json"},
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"Kirk planning server unreachable: {exc}")
+    if resp.status_code in (409, 422):
+        raise _ReplanInfeasible(f"Kirk replan ({resp.status_code}): {resp.text}")
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Kirk planning server error ({resp.status_code}): {resp.text}",
+        )
+    try:
+        return resp.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Kirk returned non-JSON response")
+
+
+async def _request_replan(reason: dict) -> dict:
+    """Run one online replan cycle:
+
+      pause dispatcher -> read executed schedule -> read world state ->
+      Kirk /replan -> re-init monitor (state preserved, executed events
+      replayed), oracle (history preserved), visualization ->
+      POST the new plan to the dispatcher WITHOUT a reset (merge + resume).
+
+    Replans are serialized; a violation that arrives while one is running is
+    coalesced into a single follow-up cycle.  On infeasibility or budget
+    exhaustion the dispatcher is halted (terminal failure), as before.
+    Returns a summary dict (also broadcast on the /violations SSE stream).
+    """
+    if _mission.in_progress:
+        # Coalesce: remember the newest reason and let the running cycle
+        # re-run once it finishes.
+        _mission.pending_reason = reason
+        log.info("Replan already in progress; queued follow-up (%s)", reason.get("source"))
+        return {"status": "replan-queued"}
+
+    async with _mission.lock:
+        _mission.in_progress = True
+        try:
+            summary = await _replan_once(reason)
+            while _mission.pending_reason is not None and summary.get("status") == "replanned":
+                follow_up = _mission.pending_reason
+                _mission.pending_reason = None
+                log.info("Running queued follow-up replan (%s)", follow_up.get("source"))
+                summary = await _replan_once(follow_up)
+            _mission.pending_reason = None
+            return summary
+        finally:
+            _mission.in_progress = False
+
+
+async def _fail_mission(reason: str) -> dict:
+    log.error("Online replanning gave up: %s", reason)
+    _mission.halted = True
+    await _halt_dispatcher(reason)
+    summary = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "janeway:replan",
+        "status": "replan-failed",
+        "reason": reason,
+        "replans": _mission.replans,
+    }
+    _mission.last_replan = summary
+    await _broadcast(summary)
+    return summary
+
+
+async def _replan_once(reason: dict) -> dict:
+    if _mission.halted:
+        return {"status": "halted", "reason": "mission already halted"}
+    if _mission.replans >= MAX_REPLANS:
+        return await _fail_mission(f"replan budget exhausted ({MAX_REPLANS})")
+
+    attempt = _mission.replans + 1
+    log.warning("── Online replan #%d triggered by %s ──", attempt, reason)
+    await _broadcast({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "janeway:replan",
+        "status": "replanning",
+        "attempt": attempt,
+        "trigger": reason,
+    })
+
+    # 1. Pause (idempotent; the dispatcher may already have paused itself).
+    try:
+        paused = await _pause_dispatcher(f"replan #{attempt}: {reason.get('source')}")
+    except Exception as exc:
+        return await _fail_mission(f"could not pause dispatcher: {exc}")
+    if not paused:
+        return await _fail_mission("dispatcher refused to pause (mission already ended)")
+
+    # 2. Let in-flight execution reports land, then read the executed schedule.
+    await asyncio.sleep(REPLAN_SETTLE_SECONDS)
+    try:
+        history = await _get_dispatch_history()
+        world_state = await _get_world_state()
+    except Exception as exc:
+        return await _fail_mission(f"could not read execution state: {exc}")
+    log.info("Replan #%d input: %d executed, %d dispatched, now=%.3f, world=%s",
+             attempt, len(history.get("executed", [])), len(history.get("dispatched", [])),
+             history.get("now", 0.0), world_state)
+
+    # 3. Kirk re-solves the clamped TPN.
+    try:
+        plan_payload = await _kirk_replan(history, world_state)
+    except _ReplanInfeasible as exc:
+        return await _fail_mission(str(exc))
+    except HTTPException as exc:
+        return await _fail_mission(f"Kirk replan error: {exc.detail}")
+    _mission.replans = attempt
+    _save_plan(plan_payload, f"replan{attempt}")
+
+    # 4. Re-init the monitor (state preserved, executed events replayed), the
+    #    oracle (history + fault counters preserved) and the visualization.
+    executed_events = [
+        {"event": e["event"], "time": e["time"]} for e in history.get("executed", [])
+    ]
+    await _initialize_monitor(plan_payload, resume=True, executed_events=executed_events)
+    await _load_oracle_plan(plan_payload, resume=True)
+    await _load_plan_visualization(plan_payload)
+
+    # 5. Merge the new plan into the running mission (no reset: the executed
+    #    prefix keeps its ids and stays in the dispatcher's history).
+    try:
+        detail = await _dispatch_plan(plan_payload, _mission.model_yaml, reset_dispatch_state=False)
+    except HTTPException as exc:
+        return await _fail_mission(f"dispatcher rejected replanned plan: {exc.detail}")
+
+    summary = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "janeway:replan",
+        "status": "replanned",
+        "attempt": attempt,
+        "trigger": reason,
+        "executed": len(executed_events),
+        "world_state": world_state,
+        "detail": detail,
+    }
+    _mission.last_replan = summary
+    log.warning("── Online replan #%d complete; mission resumed ──", attempt)
+    await _broadcast(summary)
+    return summary
+
+
+def _spawn_replan(reason: dict) -> None:
+    """Fire-and-forget replan cycle (callbacks must return immediately)."""
+
+    async def _run():
+        try:
+            await _request_replan(reason)
+        except Exception as exc:  # pragma: no cover - last-resort logging
+            log.exception("Unhandled error during online replan: %s", exc)
+            await _fail_mission(f"unhandled replan error: {exc}")
+
+    asyncio.get_event_loop().create_task(_run())
 
 
 app = FastAPI(
@@ -1019,8 +1296,7 @@ async def health():
     ]
     if ENABLE_ORACLE:
         checks.append((f"http://127.0.0.1:{ORACLE_PORT}/docs", "oracle"))
-    if ENABLE_VIS or not ENABLE_ORACLE:
-        checks.append((f"http://127.0.0.1:{TELEMETRY_PORT}/docs", "telemetry"))
+    checks.append((f"http://127.0.0.1:{TELEMETRY_PORT}/docs", "telemetry"))
     if ENABLE_VIS:
         checks.append((f"http://127.0.0.1:{VIS_PORT}/", "visualization"))
 
@@ -1060,26 +1336,76 @@ async def receive_violation(request: Request):
             log.info("Mission completed: %s", payload)
         else:
             log.warning("Mission failed: %s", payload)
-        for queue in _violation_subscribers:
-            await queue.put(payload)
+        await _broadcast(payload)
         return {"status": "received", "kind": "mission-status"}
 
+    if status == "replan-requested":
+        # The dispatcher found the remaining plan temporally inconsistent and
+        # paused itself.
+        log.warning("Dispatcher requested a replan: %s", payload)
+        await _broadcast(payload)
+        if ENABLE_REPLANNING:
+            _spawn_replan({"source": "dispatcher", "reason": payload.get("reason", "temporal"),
+                           "detail": payload.get("detail")})
+            return {"status": "received", "kind": "replan-request", "replan": "scheduled"}
+        await _halt_dispatcher(f"temporal inconsistency: {payload.get('detail')}")
+        return {"status": "received", "kind": "replan-request", "dispatcher": "halt requested"}
+
     log.warning("Causal link violation: %s", payload)
-    for queue in _violation_subscribers:
-        await queue.put(payload)
+    await _broadcast(payload)
 
-    # Halt the dispatcher so no further actions are dispatched.
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                f"http://127.0.0.1:{DISPATCHER_PORT}/halt",
-                json={"reason": f"Causal link violation: {payload.get('violations', [])}"},
-            )
-            log.warning("Dispatcher halt requested (status=%s)", resp.status_code)
-    except Exception as exc:
-        log.error("Failed to halt dispatcher: %s", exc)
+    if ENABLE_REPLANNING:
+        _spawn_replan({"source": payload.get("source", "monitor"),
+                       "violations": payload.get("violations", []),
+                       "details": payload.get("details", [])})
+        return {"status": "received", "replan": "scheduled"}
 
+    # Replanning disabled: halt the dispatcher so no further actions are dispatched.
+    await _halt_dispatcher(f"Causal link violation: {payload.get('violations', [])}")
     return {"status": "received", "dispatcher": "halt requested"}
+
+
+@app.post("/replan")
+async def replan_now(request: Request):
+    """Trigger an online replan of the running mission by hand.
+
+    Pauses the dispatcher, reads its executed schedule and the monitor's world
+    state, asks Kirk to re-solve the mission's TPN with those clamped in, and
+    resumes from the new plan.  Returns the replan summary (also published on
+    the ``GET /violations`` stream).  409 when no replan is possible (mission
+    already ended or replanning disabled), 422 when Kirk finds no plan.
+    """
+    if not ENABLE_REPLANNING:
+        raise HTTPException(status_code=409, detail="ENABLE_REPLANNING=0")
+    reason = {"source": "manual"}
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            reason.update(body)
+    except Exception:
+        pass
+    summary = await _request_replan(reason)
+    status = summary.get("status")
+    if status == "replanned":
+        return JSONResponse(status_code=202, content=summary)
+    if status == "replan-queued":
+        return JSONResponse(status_code=202, content=summary)
+    if status == "replan-failed":
+        raise HTTPException(status_code=422, detail=summary)
+    raise HTTPException(status_code=409, detail=summary)
+
+
+@app.get("/replan")
+async def replan_status():
+    """Replanning status of the current mission."""
+    return {
+        "enabled": ENABLE_REPLANNING,
+        "max_replans": MAX_REPLANS,
+        "replans": _mission.replans,
+        "in_progress": _mission.in_progress,
+        "halted": _mission.halted,
+        "last": _mission.last_replan,
+    }
 
 
 @app.get("/violations")

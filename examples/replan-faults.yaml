@@ -1,0 +1,10 @@
+# Fault spec for examples/replan-choice.rmpl (see README "Fault simulation").
+#
+# The first `drive` ends with the rover reported at site-b instead of site-a.
+# This violates the causal link drive -> sample@site-a of Kirk's initial plan
+# and triggers an online replan, which should switch to the site-b branch.
+faults:
+  - action: drive
+    times: 1
+    assignment:
+      rover1.location: "site-b"

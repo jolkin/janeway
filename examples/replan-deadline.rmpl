@@ -1,0 +1,64 @@
+;;;; -*- mode: common-lisp; -*-
+;;;; Online-replanning test program: temporal path.
+;;;;
+;;;; The whole mission must finish within 5 time units.  After the drive
+;;;; (nominally 2), the rover chooses between a thorough sample (3-4) and a quick
+;;;; sample (1).  Kirk initially picks the thorough sample (the last option, which
+;;;; its search tries first), which only fits if everything executes on time.
+;;;;
+;;;; Intended use: run with a delayed local agent (AGENT_MAX_DELAY=0.6) so that a
+;;;; late drive closes the thorough sample's window before it is dispatched; the
+;;;; dispatcher then reports the remaining plan as temporally inconsistent
+;;;; ("replan-requested"), and the replan switches to the quick sample because
+;;;; the choice has not been committed yet.
+;;;;
+;;;; Caveat (observed 2026-09-15): PyKirk anchors the deadline on the block's
+;;;; structural start/end events and its dispatcher does not propagate such a
+;;;; bound onto the activity events (non-negative edges are not dispatch
+;;;; dependencies), so with the local agent the mission can simply finish late
+;;;; without any inconsistency being raised.  The dispatcher-side trigger is
+;;;; covered by pykirk/tests/pykirk/dispatch/test_online_replan.py; to exercise
+;;;; the temporal clamp end to end, POST /replan while an activity is running.
+;;;;
+;;;;   docker run ... -e AGENT_MAX_DELAY=0.6 eaas
+;;;;   POST /execute with this file (package name: main)
+
+(defpackage #:main)
+(in-package #:main)
+
+(defclass rover ()
+  ((location
+    :initarg :location
+    :initform "base"
+    :type (member "base" "site-a")
+    :accessor location)))
+
+(define-control-program drive (rover to)
+  (declare (primitive)
+           (effect (at :end (odo:equal (location rover) to)))
+           (duration (simple :lower-bound 2 :upper-bound 4))))
+
+(define-control-program sample (rover)
+  (declare (primitive)
+           (requires (at :start (odo:equal (location rover) "site-a")))
+           (duration (simple :lower-bound 3 :upper-bound 4))))
+
+(define-control-program quick-sample (rover)
+  (declare (primitive)
+           (requires (at :start (odo:equal (location rover) "site-a")))
+           (duration (simple :lower-bound 1 :upper-bound 1))))
+
+(define-initial-state start-state ()
+  (:objects
+   (rover1 (make-instance 'rover :location "base" :state-space-name "rover1"))))
+
+(define-control-program main (rover)
+  (with-temporal-constraint (simple-temporal :lower-bound 0 :upper-bound 5)
+    (sequence (:slack t)
+      (drive rover "site-a")
+      (simple-choice
+       (list
+        (quick-sample rover)
+        (sample rover))))))
+
+(define-model test-model "replan-deadline.yaml")

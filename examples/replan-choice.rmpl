@@ -1,0 +1,61 @@
+;;;; -*- mode: common-lisp; -*-
+;;;; Online-replanning test program.
+;;;;
+;;;; A rover drives to site-a, checks its instruments, and then chooses between
+;;;; sampling at site-a (requires being at site-a) or driving on to site-b and
+;;;; sampling there.  Kirk initially commits to the first branch (fewer
+;;;; activities).  If the drive to site-a "goes wrong" (the fault spec in
+;;;; replan-faults.yaml reports the rover at site-b instead), the causal link
+;;;; drive -> sample@site-a is violated while `check` is still running, the
+;;;; monitor reports it, and the online replan must switch to the second branch
+;;;; because the choice has not been committed yet.
+;;;;
+;;;;   POST /execute with this file (package name: main) and
+;;;;   FAULT_SPEC_FILE=examples/replan-faults.yaml
+
+(defpackage #:main)
+(in-package #:main)
+
+(defclass rover ()
+  ((location
+    :initarg :location
+    :initform "base"
+    :type (member "base" "site-a" "site-b")
+    :accessor location
+    :documentation "Where the rover currently is.")))
+
+;; Drive to a site.  No precondition (the rover can drive from anywhere).
+(define-control-program drive (rover to)
+  (declare (primitive)
+           (effect (at :end (odo:equal (location rover) to)))
+           (duration (simple :lower-bound 2 :upper-bound 4))))
+
+;; Instrument check: a gap between the drive and the choice so that the fault on
+;; the drive is observed before the choice's branch is dispatched.
+(define-control-program check (rover)
+  (declare (primitive)
+           (duration (simple :lower-bound 4 :upper-bound 6))))
+
+;; Take a sample; only possible at the given site.
+(define-control-program sample (rover at)
+  (declare (primitive)
+           (requires (at :start (odo:equal (location rover) at)))
+           (duration (simple :lower-bound 2 :upper-bound 3))))
+
+(define-initial-state start-state ()
+  (:objects
+   (rover1 (make-instance 'rover :location "base" :state-space-name "rover1"))))
+
+(define-control-program main (rover)
+  (with-temporal-constraint (simple-temporal :lower-bound 0 :upper-bound 60)
+    (sequence (:slack t)
+      (drive rover "site-a")
+      (check rover)
+      (simple-choice
+       (list
+        (sample rover "site-a")
+        (sequence (:slack t)
+          (drive rover "site-b")
+          (sample rover "site-b")))))))
+
+(define-model test-model "replan-choice.yaml")

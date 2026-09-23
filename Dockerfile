@@ -148,7 +148,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl3 \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version && npm --version
 
 # ── Install uv (used to run pykirk services) ──────────────────────────────────
 RUN pip install --no-cache-dir uv
