@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Documentation — Janeway</title>
+  <meta name="description" content="API reference and run-mode documentation for Janeway — baseline, visualization, fault injection, and ROS 2 bridge.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="brand-mark"></span>Janeway</a>
+    <div class="nav-links">
+      <a href="index.html">Home</a>
+      <a class="active" href="documentation.html">Documentation</a>
+      <a href="tutorials.html">Tutorials</a>
+      <a href="publications.html">Publications</a>
+      <a class="external" href="https://github.com/jolkin/janeway" target="_blank" rel="noopener">View on GitHub</a>
+      <a href="contact.html">Contact</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero compact">
+  <div class="hero-inner">
+    <h1>Documentation</h1>
+    <p class="tagline">The user-facing API, the four supported run modes, and the configuration knobs that distinguish them.</p>
+  </div>
+</header>
+
+<div class="page with-toc">
+  <main>
+
+    <p class="lead">
+      Janeway runs as a single Docker container that exposes its full functionality over HTTP. This
+      page documents the run modes most users need (<a href="#baseline">baseline</a>,
+      <a href="#visualization">with visualization</a>, <a href="#faults">with fault injection</a>,
+      <a href="#ros-bridge">with a ROS&nbsp;2 bridge</a>) and the complete HTTP API surface.
+    </p>
+
+    <div class="callout info">
+      <span class="callout-title">Prerequisite</span>
+      Janeway is shipped as a Docker image and orchestrated with Docker Compose. If you don't yet
+      have a working clone, follow the <a href="tutorials.html#install">installation tutorial</a>
+      first.
+    </div>
+
+    <!-- ─── BASELINE ─── -->
+    <h2 id="baseline" class="anchor-h">Baseline operation <a class="perma" href="#baseline">¶</a></h2>
+
+    <p>
+      The default invocation runs Janeway as a pure HTTP API. Every endpoint described under
+      <a href="#api">API reference</a> is reachable; no browser frontend, fault oracle, or ROS
+      integration is enabled.
+    </p>
+
+    <pre><code>docker compose up</code></pre>
+
+    <p>
+      The first invocation builds the image (5–10 minutes); subsequent invocations reuse it.
+      Janeway is ready to accept traffic the moment <code>compose</code> logs:
+    </p>
+
+    <pre><code>Uvicorn running on http://0.0.0.0:8000</code></pre>
+
+    <h3>Ports exposed</h3>
+    <table>
+      <thead><tr><th>Port</th><th>Service</th></tr></thead>
+      <tbody>
+        <tr><td><code>:8000</code></td><td>HTTP API (this is the surface you submit plans to)</td></tr>
+        <tr><td><code>:9004</code></td><td>Plan visualization (d3-dag of the active plan)</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Submit a plan</h3>
+    <p>The three input formats correspond to three endpoints:</p>
+    <pre><code># RMPL — Janeway's native format
+curl -X POST http://localhost:8000/execute \
+     -H "Content-Type: text/plain" \
+     --data-binary @my_program.rmpl
+
+# PDDL — converted to a state plan via pddl_to_sp, then planned by Kirk
+curl -X POST http://localhost:8000/execute-pddl \
+     -F "domain=@my_domain.pddl" \
+     -F "problem=@my_problem.pddl" \
+     -F "plan_file=@my_pddl_plan.txt"
+
+# Raw state plan — forwarded verbatim to Kirk
+curl -X POST http://localhost:8000/execute-state-plan \
+     -H "Content-Type: application/json" \
+     --data-binary @my_state_plan.json</code></pre>
+
+    <p>
+      Each of these returns <code>202 Accepted</code> with a JSON body of
+      <code>{"status": "dispatched", ...}</code>. Dispatch proceeds asynchronously — to follow
+      what happens next, open a stream against <code>/violations</code> (see
+      <a href="#api-violations">below</a>).
+    </p>
+
+    <h3>Generated artifacts</h3>
+    <p>Every plan run produces a snapshot and a set of service logs under the host-mounted directory <code>generated_plans/</code>:</p>
+    <table>
+      <thead><tr><th>File</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>&lt;timestamp&gt;_&lt;source&gt;.json</code></td><td>Plan JSON snapshots (RMPL / PDDL / state-plan inputs and Kirk outputs).</td></tr>
+        <tr><td><code>janeway.log</code></td><td>The <code>eaas</code> logger plus any Uvicorn output.</td></tr>
+        <tr><td><code>kirk-serve.log</code></td><td>Kirk's Lisp planning server stdout/stderr.</td></tr>
+        <tr><td><code>dispatcher.log</code>, <code>monitor.log</code>, <code>local-oracle.log</code>, <code>local-agent.log</code>, <code>telemetry.log</code>, <code>plan-visualization.log</code></td><td>Per-service stdout/stderr.</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ─── VISUALIZATION ─── -->
+    <h2 id="visualization" class="anchor-h">Running with visualizations <a class="perma" href="#visualization">¶</a></h2>
+
+    <p>
+      Setting <code>ENABLE_VIS=1</code> additionally starts the Vite-served browser frontend. The
+      plan-visualization graph at <code>:9004</code> is always on; <code>ENABLE_VIS</code>
+      specifically adds the scenario-aware browser scene (e.g. the drone view).
+    </p>
+
+    <pre><code>ENABLE_VIS=1 docker compose up</code></pre>
+
+    <p>Once the container is ready, the browser frontend lives at:</p>
+    <pre><code>http://localhost:5173</code></pre>
+
+    <p>
+      The Vite dev server proxies <code>/ws</code> to Janeway's in-container telemetry server, so
+      the browser reaches both the page and the WebSocket through the same origin. Override
+      <code>VIS_WS_URL</code> only if the visualization is served from a CDN or reverse proxy that
+      can't forward <code>/ws</code> back into the container.
+    </p>
+
+    <h3>Drone scene — visualization as execution oracle</h3>
+    <p>
+      The drone scene is special-cased: the in-browser visualization also acts as the dispatch
+      oracle. Each time the drone visually completes an action, the frontend POSTs the matching
+      <code>*_end</code> event to the dispatcher and the action's effect to the causal-link
+      monitor. This lets you run the drone example with <code>ENABLE_ORACLE=0</code> and still get
+      a fully advancing mission.
+    </p>
+    <table>
+      <thead><tr><th>Verb</th><th>Monitor state update</th></tr></thead>
+      <tbody>
+        <tr><td><code>fly</code></td><td><code>DRONE1.DRONE-AT = &lt;"to" arg&gt;</code></td></tr>
+        <tr><td><code>scoop</code></td><td><code>DRONE1.HAS-WATER = true</code>, <code>DRONE1.TANK-EMPTY = false</code></td></tr>
+        <tr><td><code>deliver</code></td><td><code>DRONE1.HAS-WATER = false</code>, <code>DRONE1.TANK-EMPTY = true</code>, <code>HOUSEN.FIRE = false</code>, <code>HOUSEN.EXTINGUISHED = true</code></td></tr>
+      </tbody>
+    </table>
+    <p>Two manual fault buttons in the visualization remain available and POST directly to the monitor.</p>
+
+    <!-- ─── FAULT INJECTION ─── -->
+    <h2 id="faults" class="anchor-h">Running with fault injection <a class="perma" href="#faults">¶</a></h2>
+
+    <p>Two modes are available, and they compose.</p>
+
+    <h3>Blanket negation</h3>
+    <p>
+      Set <code>SIMULATE_FAULTS=1</code>. After posting the correct state update for any causal
+      link, the oracle immediately posts a conflicting update for the same variables. Useful as a
+      smoke test for the violation pipeline.
+    </p>
+    <pre><code>SIMULATE_FAULTS=1 docker compose up</code></pre>
+
+    <h3>Spec-driven faults</h3>
+    <p>
+      Mount a YAML file describing which actions should fail, how many times, and what state
+      assignment to inject:
+    </p>
+    <pre><code># faults.yaml
+faults:
+  - action: drive          # matches event names like DRIVE_END_8, drive_3_end
+    times: 2               # fire the fault twice, then stop
+    assignment:
+      rover1.location: "lost"
+  - action: science
+    times: 1
+    assignment:
+      rover1.has_sample: false</code></pre>
+
+    <p>
+      The spec file lives on the host. Mount it in through a
+      <code>docker-compose.override.yml</code> (auto-loaded by compose; ignored from version
+      control):
+    </p>
+    <pre><code># docker-compose.override.yml
+services:
+  eaas:
+    volumes:
+      - ./faults.yaml:/app/faults.yaml:ro
+    environment:
+      FAULT_SPEC_FILE: /app/faults.yaml</code></pre>
+
+    <p>Then start the container as normal:</p>
+    <pre><code>docker compose up</code></pre>
+
+    <div class="callout info">
+      <span class="callout-title">Modes compose</span>
+      If both <code>SIMULATE_FAULTS=1</code> and <code>FAULT_SPEC_FILE</code> are set, an action
+      listed in the spec uses the spec's assignment; every other action falls back to
+      blanket negation.
+    </div>
+
+    <!-- ─── ROS BRIDGE ─── -->
+    <h2 id="ros-bridge" class="anchor-h">Running with a ROS 2 bridge <a class="perma" href="#ros-bridge">¶</a></h2>
+
+    <p>
+      To drive a real robot — or any external system — set <code>ENABLE_ORACLE=0</code>. The local
+      oracle is disabled and the PyKirk dispatcher binds to <code>0.0.0.0:9000</code> so execution
+      reports can come in from outside the container. The bundled
+      <a href="https://github.com/jolkin/janeway/tree/main/ros_bridge" target="_blank" rel="noopener">ros_bridge</a>
+      package is the supported integration; any HTTP client posting to
+      <code>/handle_execution</code> will also work.
+    </p>
+
+    <pre><code>ENABLE_ORACLE=0 docker compose up</code></pre>
+
+    <h3>What the bridge does</h3>
+    <ul>
+      <li><strong>Outbound</strong> (container → ROS): connects to the in-container telemetry WebSocket and publishes every dispatch event on <code>/eaas/events</code> as a <code>std_msgs/String</code> containing JSON.</li>
+      <li><strong>Inbound</strong> (ROS → container): subscribes to <code>/eaas/execution_reports</code> and forwards each message as an HTTP POST to the dispatcher's <code>/handle_execution</code> endpoint.</li>
+    </ul>
+
+    <h3>Install the bridge in your ROS 2 workspace</h3>
+    <p>Requires a sourced ROS 2 workspace (Humble or later) with <code>rclpy</code> and <code>std_msgs</code>.</p>
+    <pre><code># From your ROS 2 workspace src/ directory
+ln -s /path/to/janeway/ros_bridge .
+cd ..
+pip install websockets aiohttp
+colcon build --packages-select ros_bridge
+source install/setup.bash</code></pre>
+
+    <h3>Run the bridge</h3>
+    <pre><code># Default — connects to localhost:8002 (telemetry) and localhost:9000 (dispatcher)
+ros2 run ros_bridge bridge_node
+
+# Custom URLs
+ros2 run ros_bridge bridge_node --ros-args \
+  -p telemetry_ws_url:=ws://192.168.1.10:8002/ws \
+  -p dispatcher_url:=http://192.168.1.10:9000
+
+# Or via launch file
+ros2 launch ros_bridge bridge.launch.py \
+  telemetry_ws_url:=ws://192.168.1.10:8002/ws</code></pre>
+
+    <h3>Bridge parameters</h3>
+    <table>
+      <thead><tr><th>Parameter</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>telemetry_ws_url</code></td><td><code>ws://localhost:8002/ws</code></td><td>Telemetry WebSocket URL (inside the Janeway container).</td></tr>
+        <tr><td><code>dispatcher_url</code></td><td><code>http://localhost:9000</code></td><td>Dispatcher HTTP URL (inside the Janeway container).</td></tr>
+        <tr><td><code>event_topic</code></td><td><code>/eaas/events</code></td><td>ROS topic for outbound dispatch events.</td></tr>
+        <tr><td><code>report_topic</code></td><td><code>/eaas/execution_reports</code></td><td>ROS topic for inbound execution reports.</td></tr>
+        <tr><td><code>reconnect_delay</code></td><td><code>3.0</code></td><td>Seconds to wait before reconnecting after a WS drop.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Sending an execution report from ROS</h3>
+    <p>Publish a <code>std_msgs/String</code> to <code>/eaas/execution_reports</code> with a JSON body:</p>
+    <pre><code>{
+  "event": "drive_1_end",
+  "execution_time": 12.5,
+  "is_controllable": true
+}</code></pre>
+
+    <h3>Listening for dispatch events</h3>
+    <p>Subscribe to <code>/eaas/events</code>. Each message is a JSON string with the telemetry event format:</p>
+    <pre><code>{
+  "type": "execution",
+  "timestamp": "2026-03-23T14:30:00.000",
+  "source": "agent",
+  "data": {
+    "agent_id": "agent_0",
+    "event": "drive_1_start",
+    "verb": "drive",
+    "time": 4.0,
+    "controllable": true
+  }
+}</code></pre>
+
+    <!-- ─── CONFIG ─── -->
+    <h2 id="config" class="anchor-h">Configuration reference <a class="perma" href="#config">¶</a></h2>
+
+    <p>
+      All scenario behavior is controlled by environment variables, set either inline before
+      <code>docker compose up</code> or in a <code>.env</code> file next to <code>docker-compose.yml</code>.
+    </p>
+
+    <table>
+      <thead><tr><th>Variable</th><th>Default</th><th>When to set it</th></tr></thead>
+      <tbody>
+        <tr><td><code>ENABLE_VIS</code></td><td><code>0</code></td><td><code>1</code> to start the Vite visualization frontend at <code>:5173</code>.</td></tr>
+        <tr><td><code>ENABLE_ORACLE</code></td><td><code>1</code></td><td><code>0</code> to disable the local oracle and expose the dispatcher at <code>:9000</code> for external execution reports.</td></tr>
+        <tr><td><code>SIMULATE_FAULTS</code></td><td><code>0</code></td><td><code>1</code> for blanket-negation fault injection from the oracle.</td></tr>
+        <tr><td><code>FAULT_SPEC_FILE</code></td><td><em>unset</em></td><td>Path inside the container to a YAML fault spec.</td></tr>
+        <tr><td><code>MISSION_STATUS_CALLBACK_URL</code></td><td><em>unset</em></td><td>URL to POST <code>{"status": "completed"|"fail"}</code> when a mission terminates.</td></tr>
+        <tr><td><code>VIS_WS_URL</code></td><td>derived</td><td>Override only when the browser can't reach the telemetry WebSocket through the Vite proxy.</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ─── API ─── -->
+    <h2 id="api" class="anchor-h">API reference <a class="perma" href="#api">¶</a></h2>
+
+    <h3 id="api-execute">POST /execute</h3>
+    <p>Submit an RMPL program for planning and execution.</p>
+    <ul>
+      <li><strong>Request body</strong> — either raw RMPL text with <code>Content-Type: text/plain</code>, or JSON with <code>Content-Type: application/json</code> and an <code>"rmpl"</code> key.</li>
+      <li><strong>Optional header</strong> — <code>X-Package-Name</code> (RMPL package to plan; default <code>main</code>).</li>
+      <li><strong>Response</strong> — <code>202 Accepted</code> with <code>{"status": "dispatched", ...}</code>.</li>
+    </ul>
+    <pre><code>curl -X POST http://localhost:8000/execute \
+     -H "Content-Type: text/plain" \
+     -H "X-Package-Name: my-package-name" \
+     --data-binary @my_program.rmpl</code></pre>
+
+    <h3 id="api-execute-pddl">POST /execute-pddl</h3>
+    <p>Submit a PDDL problem for planning and execution. Multipart form data with these fields:</p>
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>domain</code></td><td>file upload</td><td>PDDL domain file (durative actions).</td></tr>
+        <tr><td><code>problem</code></td><td>file upload</td><td>PDDL problem file (objects, init, goal).</td></tr>
+        <tr><td><code>plan</code></td><td>text field</td><td>Temporal plan — one <code>START: action(args) [DUR]</code> line per action. <strong>Either <code>plan</code> or <code>plan_file</code> is required.</strong></td></tr>
+        <tr><td><code>plan_file</code></td><td>file upload</td><td>Same temporal plan, uploaded as a file. Convenient for clients that pipe a planner's output to a file.</td></tr>
+      </tbody>
+    </table>
+    <p>The temporal plan format follows the standard PDDL temporal planner output:</p>
+    <pre><code>0.0: load(package1, truck1, city1) [1.0]
+1.0: drive(truck1, city1, city2) [3.0]
+4.0: unload(package1, truck1, city2) [1.0]</code></pre>
+
+    <h3 id="api-execute-state-plan">POST /execute-state-plan</h3>
+    <p>
+      Submit a state plan JSON directly. Skips <code>pddl_to_sp</code> and any RMPL-to-plan
+      translation; the body is forwarded verbatim to Kirk's
+      <code>POST /plan-from-state-plan</code>.
+    </p>
+    <pre><code>curl -X POST http://localhost:8000/execute-state-plan \
+     -H "Content-Type: application/json" \
+     --data-binary @my_state_plan.json</code></pre>
+
+    <h3 id="api-resume">POST /resume</h3>
+    <p>
+      Continue an in-progress mission with an updated plan. Unlike <code>/execute*</code>, which
+      always starts a <em>new</em> mission and resets the causal-link monitor to a blank world
+      state, <code>/resume</code> preserves the monitor's observed <code>current_state</code>
+      across re-initialization. Typical use is after a fault halt: read the live world state from
+      <code>GET /state</code>, hand it to your planner, then POST the resulting state plan back
+      here.
+    </p>
+    <pre><code># Typical resume flow after a fault halt
+curl -X GET  http://localhost:8000/state > current_state.json
+# ... planner generates a new state plan from current_state.json ...
+curl -X POST http://localhost:8000/resume \
+     -H "Content-Type: application/json" \
+     --data-binary @new_state_plan.json</code></pre>
+
+    <h3 id="api-state">GET /state</h3>
+    <p>Return the current state of the world as tracked by the causal-link monitor.</p>
+    <pre><code>curl http://localhost:8000/state
+# {"assignments": {"rover1.location": {"variable": "rover1.location", "value": "science1"},
+#                  "rover1.has_sample": {"variable": "rover1.has_sample", "value": true}}}</code></pre>
+
+    <h3 id="api-health">GET /health</h3>
+    <p>Returns the liveness of the server and all internal services.</p>
+    <pre><code>curl http://localhost:8000/health
+# {"status": "ok", "services": {"kirk": "ok", "dispatcher": "ok", "agent": "ok", "oracle": "ok"}}</code></pre>
+
+    <h3 id="api-violations">GET /violations</h3>
+    <p>
+      Server-Sent Events (SSE) stream of plan-execution outcomes — both causal-link violations and
+      terminal mission-status notifications. The connection stays open and delivers events in real
+      time.
+    </p>
+    <pre><code>curl -N http://localhost:8000/violations</code></pre>
+
+    <p><strong>Violation event</strong> (when the monitor detects a causal-link conflict):</p>
+    <pre><code>{
+  "timestamp": "2026-03-26T14:30:00.000000+00:00",
+  "source": "state-update",
+  "violations": ["True violates active (Q=False): Start->Action2)"]
+}</code></pre>
+    <p>
+      The <code>source</code> field indicates how the violation was detected:
+      <code>"state-update"</code> (oracle state post), <code>"event-observation"</code>
+      (action start/end event), or <code>"event:&lt;timing&gt;:&lt;name&gt;"</code> (telemetry).
+    </p>
+
+    <p><strong>Mission-status event</strong> (when the dispatcher finishes a plan):</p>
+    <pre><code>{
+  "timestamp": "2026-05-26T20:43:36.300000+00:00",
+  "source": "dispatcher:agent_0",
+  "status": "completed"
+}</code></pre>
+    <p>
+      <code>status</code> is <code>"completed"</code> when every event executed and <code>"fail"</code>
+      when the dispatcher halted (e.g. due to a violation). Status events don't trigger a halt —
+      they're informational.
+    </p>
+
+  </main>
+
+  <aside class="toc">
+    <h4>On this page</h4>
+    <ul>
+      <li><a href="#baseline">Baseline operation</a></li>
+      <li><a href="#visualization">Running with visualizations</a></li>
+      <li><a href="#faults">Running with fault injection</a></li>
+      <li><a href="#ros-bridge">Running with a ROS 2 bridge</a></li>
+      <li><a href="#config">Configuration reference</a></li>
+      <li><a href="#api">API reference</a>
+        <ul>
+          <li><a href="#api-execute">POST /execute</a></li>
+          <li><a href="#api-execute-pddl">POST /execute-pddl</a></li>
+          <li><a href="#api-execute-state-plan">POST /execute-state-plan</a></li>
+          <li><a href="#api-resume">POST /resume</a></li>
+          <li><a href="#api-state">GET /state</a></li>
+          <li><a href="#api-health">GET /health</a></li>
+          <li><a href="#api-violations">GET /violations</a></li>
+        </ul>
+      </li>
+    </ul>
+  </aside>
+</div>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div>Janeway is part of the <a href="https://github.com/jolkin" target="_blank" rel="noopener">MIT MERS group</a> tooling.</div>
+    <div><a href="https://github.com/jolkin/janeway" target="_blank" rel="noopener">Source on GitHub</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

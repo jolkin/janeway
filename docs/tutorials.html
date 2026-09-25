@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tutorials — Janeway</title>
+  <meta name="description" content="Step-by-step installation guide for Janeway and a complete walkthrough of the bundled drone-firefighting PDDL example.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="brand-mark"></span>Janeway</a>
+    <div class="nav-links">
+      <a href="index.html">Home</a>
+      <a href="documentation.html">Documentation</a>
+      <a class="active" href="tutorials.html">Tutorials</a>
+      <a href="publications.html">Publications</a>
+      <a class="external" href="https://github.com/jolkin/janeway" target="_blank" rel="noopener">View on GitHub</a>
+      <a href="contact.html">Contact</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero compact">
+  <div class="hero-inner">
+    <h1>Tutorials</h1>
+    <p class="tagline">Install Janeway, run the bundled drone-firefighting PDDL example, and learn how to extend the same recipe to your own plans.</p>
+  </div>
+</header>
+
+<div class="page with-toc">
+  <main>
+
+    <p class="lead">
+      This page walks you through a full first run from a clean machine: clone the repository,
+      build the container, and submit the example PDDL problem under
+      <a href="https://github.com/jolkin/janeway/tree/main/examples/pddl" target="_blank" rel="noopener"><code>examples/pddl/</code></a>.
+      It should take about 10–15 minutes the first time, almost all of which is the image build.
+    </p>
+
+    <!-- ─── INSTALL ─── -->
+    <h2 id="install" class="anchor-h">1. Install prerequisites <a class="perma" href="#install">¶</a></h2>
+
+    <p>You need:</p>
+    <ul>
+      <li><strong>Git</strong> (with submodule support — any recent version).</li>
+      <li><strong>Docker</strong> with the <code>docker compose</code> plugin (Docker Desktop on macOS / Windows already ships with both; on Linux install <a href="https://docs.docker.com/engine/install/" target="_blank" rel="noopener">Docker Engine</a> + the <a href="https://docs.docker.com/compose/install/" target="_blank" rel="noopener">Compose plugin</a>).</li>
+      <li><strong>cURL</strong> — for the example commands below. Any HTTP client works.</li>
+    </ul>
+
+    <p>Confirm both are reachable from your shell:</p>
+    <pre><code>docker --version
+docker compose version
+git --version</code></pre>
+
+    <!-- ─── CLONE ─── -->
+    <h2 id="clone" class="anchor-h">2. Clone the repository <a class="perma" href="#clone">¶</a></h2>
+
+    <p>
+      Janeway uses git submodules to vendor the Kirk planner, PyKirk dispatcher, PDDL converter,
+      and causal-link monitor. Clone with <code>--recurse-submodules</code> to fetch them all in
+      one shot:
+    </p>
+
+    <pre><code>git clone --recurse-submodules https://github.com/jolkin/janeway.git
+cd janeway</code></pre>
+
+    <p>
+      Already cloned without submodules? You can hydrate them after the fact:
+    </p>
+    <pre><code>git submodule update --init --recursive</code></pre>
+
+    <!-- ─── BUILD ─── -->
+    <h2 id="build" class="anchor-h">3. Build and start the container <a class="perma" href="#build">¶</a></h2>
+
+    <p>From the repository root:</p>
+    <pre><code>docker compose up</code></pre>
+
+    <p>
+      The first invocation builds the image, which takes <strong>5–10 minutes</strong> — it
+      compiles the Kirk Lisp planner from source and installs the Python dispatch layer.
+      Subsequent invocations reuse the image and start in seconds.
+    </p>
+
+    <p>Janeway is ready to accept traffic when you see this line in the compose logs:</p>
+    <pre><code>Uvicorn running on http://0.0.0.0:8000</code></pre>
+
+    <p>Sanity-check the server in a second terminal:</p>
+    <pre><code>curl http://localhost:8000/health
+# {"status": "ok", "services": {"kirk": "ok", "dispatcher": "ok", "agent": "ok", "oracle": "ok"}}</code></pre>
+
+    <div class="callout info">
+      <span class="callout-title">Tip</span>
+      Leave the <code>docker compose up</code> terminal open so you can watch the server, oracle,
+      and dispatcher logs scroll by as the next step runs.
+    </div>
+
+    <!-- ─── RUN EXAMPLE ─── -->
+    <h2 id="run-example" class="anchor-h">4. Run the drone PDDL example <a class="perma" href="#run-example">¶</a></h2>
+
+    <p>
+      The repository ships a small <em>drone-firefighting</em> domain: a drone repeatedly flies
+      between a lake and houses on fire, scooping water and delivering it until the fires are out.
+      The three input files live under
+      <a href="https://github.com/jolkin/janeway/tree/main/examples/pddl" target="_blank" rel="noopener"><code>examples/pddl/</code></a>:
+    </p>
+    <table>
+      <thead><tr><th>File</th><th>Role</th></tr></thead>
+      <tbody>
+        <tr><td><code>drone_domain.pddl</code></td><td>PDDL domain — types, predicates, and the three durative actions (<code>fly</code>, <code>scoop</code>, <code>deliver</code>).</td></tr>
+        <tr><td><code>drone_problem.pddl</code></td><td>PDDL problem — drone, lake, and houses; goal is for every house to be extinguished.</td></tr>
+        <tr><td><code>drone_plan.txt</code></td><td>A pre-generated temporal plan that solves the problem.</td></tr>
+      </tbody>
+    </table>
+
+    <p>The bundled <code>run.sh</code> wraps the right cURL invocation:</p>
+    <pre><code>cd examples/pddl
+./run.sh
+
+# Equivalent to:
+# curl -X POST http://localhost:8000/execute-pddl \
+#      -F "domain=@drone_domain.pddl" \
+#      -F "problem=@drone_problem.pddl" \
+#      -F "plan_file=@drone_plan.txt"</code></pre>
+
+    <p>If everything is wired up correctly, you'll see a response like:</p>
+    <pre><code>{"status": "dispatched", "mission_id": "..."}</code></pre>
+
+    <p>
+      The compose terminal will start emitting dispatch events as the oracle drives the plan
+      forward — <code>fly_1_start</code>, <code>fly_1_end</code>, <code>scoop_2_start</code>, and
+      so on.
+    </p>
+
+    <!-- ─── OBSERVE ─── -->
+    <h2 id="observe" class="anchor-h">5. Watch the execution <a class="perma" href="#observe">¶</a></h2>
+
+    <h3>Live event stream</h3>
+    <p>In a third terminal, tail the violation/mission-status SSE stream:</p>
+    <pre><code>curl -N http://localhost:8000/violations</code></pre>
+
+    <p>
+      When the dispatcher finishes, you'll see a terminal status event. For the unmodified drone
+      plan it should be:
+    </p>
+    <pre><code>{"timestamp": "...", "source": "dispatcher:agent_0", "status": "completed"}</code></pre>
+
+    <h3>Plan visualization</h3>
+    <p>Point your browser at:</p>
+    <pre><code>http://localhost:9004</code></pre>
+    <p>
+      You'll see a d3-dag rendering of the plan with events, temporal constraints, episode edges,
+      and causal links laid out left-to-right. The view updates as new plans are submitted.
+    </p>
+
+    <h3>Inspect the current world state</h3>
+    <pre><code>curl http://localhost:8000/state</code></pre>
+
+    <h3>Browse generated artifacts</h3>
+    <p>
+      Every plan run produces a snapshot under the host-mounted directory <code>generated_plans/</code>
+      next to <code>docker-compose.yml</code>, alongside the per-service logs
+      (<code>janeway.log</code>, <code>kirk-serve.log</code>, <code>dispatcher.log</code>, etc.).
+    </p>
+
+    <!-- ─── EXTEND ─── -->
+    <h2 id="extend" class="anchor-h">6. Where to go from here <a class="perma" href="#extend">¶</a></h2>
+
+    <ul>
+      <li>
+        Try the same example with the <strong>drone visualization scene</strong> by adding
+        <code>ENABLE_VIS=1</code>:
+        <pre><code>ENABLE_VIS=1 docker compose up</code></pre>
+        Then open <a href="http://localhost:5173">http://localhost:5173</a>.
+      </li>
+      <li>
+        Add a <strong>fault</strong> to the run — see
+        <a href="documentation.html#faults">Running with fault injection</a> for the YAML spec
+        format and the <code>SIMULATE_FAULTS</code> blanket mode.
+      </li>
+      <li>
+        Drive the example from a <strong>ROS 2 system</strong> instead of the in-container oracle —
+        see <a href="documentation.html#ros-bridge">Running with a ROS 2 bridge</a>.
+      </li>
+      <li>
+        Swap in <strong>your own PDDL domain</strong> — supply your three files to the
+        <code>/execute-pddl</code> endpoint exactly the way <code>run.sh</code> does. The
+        <a href="documentation.html#api-execute-pddl">API reference</a> documents the multipart
+        form fields.
+      </li>
+    </ul>
+
+  </main>
+
+  <aside class="toc">
+    <h4>On this page</h4>
+    <ul>
+      <li><a href="#install">1. Install prerequisites</a></li>
+      <li><a href="#clone">2. Clone the repository</a></li>
+      <li><a href="#build">3. Build and start the container</a></li>
+      <li><a href="#run-example">4. Run the drone PDDL example</a></li>
+      <li><a href="#observe">5. Watch the execution</a></li>
+      <li><a href="#extend">6. Where to go from here</a></li>
+    </ul>
+  </aside>
+</div>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div>Janeway is part of the <a href="https://github.com/jolkin" target="_blank" rel="noopener">MIT MERS group</a> tooling.</div>
+    <div><a href="https://github.com/jolkin/janeway" target="_blank" rel="noopener">Source on GitHub</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,15 +1,12 @@
-[submodule "pykirk"]
-	path = pykirk
-	url = https://git.mers.csail.mit.edu/enterprise/pykirk
 [submodule "enterprise"]
 	path = enterprise
-	url = https://git.mers.csail.mit.edu/enterprise/enterprise
+	url = https://gitlab.com/mit-mers/enterprise/enterprise.git
+[submodule "pykirk"]
+	path = pykirk
+	url = https://gitlab.com/mit-mers/enterprise/pykirk-dispatcher.git
 [submodule "pddl_to_sp"]
 	path = pddl_to_sp
-	url = https://git.mers.csail.mit.edu/enterprise/pddl_to_sp
+	url = https://gitlab.com/mit-mers/enterprise/pddl_to_sp.git
 [submodule "robust-execution"]
 	path = robust-execution
-	url = https://git.mers.csail.mit.edu/enterprise/robust-execution
-[submodule "MPCScotty"]
-	path = MPCScotty
-	url = https://git.mers.csail.mit.edu/planners/MPCScotty.git
+	url = https://gitlab.com/mit-mers/enterprise/robust-execution.git

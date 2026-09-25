@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Janeway — Execution as a Service</title>
+  <meta name="description" content="Janeway is an HTTP-served execution engine for AI plans — RMPL, PDDL, and raw state-plan inputs, with built-in fault injection and a ROS 2 bridge.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="brand-mark"></span>Janeway</a>
+    <div class="nav-links">
+      <a class="active" href="index.html">Home</a>
+      <a href="documentation.html">Documentation</a>
+      <a href="tutorials.html">Tutorials</a>
+      <a href="publications.html">Publications</a>
+      <a class="external" href="https://github.com/jolkin/janeway" target="_blank" rel="noopener">View on GitHub</a>
+      <a href="contact.html">Contact</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="hero-inner">
+    <h1>Janeway</h1>
+    <p class="tagline">An HTTP-served execution engine for AI plans — RMPL, PDDL, and raw state plans, with built-in fault injection and a ROS 2 bridge.</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="tutorials.html">Get started</a>
+      <a class="btn btn-ghost" href="documentation.html">Read the docs</a>
+    </div>
+  </div>
+</header>
+
+<div class="page">
+  <main>
+    <h2>What is Janeway?</h2>
+    <p>
+      Janeway is a Docker-packaged service that takes an AI plan in any of three input formats —
+      <strong>RMPL</strong> (the native Kirk format), <strong>PDDL</strong> (a domain, problem, and
+      temporal plan), or a <strong>raw state plan JSON</strong> — and runs it end-to-end through
+      planning, dispatch, and causal-link monitoring. Once the container is up, the entire surface
+      is reachable over HTTP at <code>http://localhost:8000</code>.
+    </p>
+
+    <h2>What is it for?</h2>
+    <p>
+      Janeway is built for researchers and engineers who want a single, reproducible deployment of
+      the <a href="https://github.com/jolkin/enterprise" target="_blank" rel="noopener">Kirk</a>
+      planner and the <a href="https://github.com/jolkin/pykirk-dispatcher" target="_blank" rel="noopener">PyKirk</a>
+      dispatcher, without rebuilding the pieces locally. It is well-suited to:
+    </p>
+    <ul>
+      <li>Submitting plans from a notebook or CI job and streaming back the resulting dispatch events.</li>
+      <li>Running fault-injection experiments against a known plan, either through a blanket-negation oracle or a YAML-driven spec.</li>
+      <li>Driving a real robot through the bundled <strong>ROS 2 bridge</strong>, with Janeway producing dispatch events and consuming execution reports.</li>
+      <li>Visually inspecting the planned and live execution graph in the browser through the included plan-visualization frontend.</li>
+    </ul>
+
+    <h2>What's inside?</h2>
+    <div class="card-grid">
+      <a class="card-link" href="https://github.com/jolkin/enterprise" target="_blank" rel="noopener">
+        <div class="card">
+          <h3>Kirk</h3>
+          <p>The Common Lisp planning engine. Takes an RMPL program or a state plan and produces a scheduled state plan.</p>
+        </div>
+      </a>
+      <a class="card-link" href="https://github.com/jolkin/pykirk-dispatcher" target="_blank" rel="noopener">
+        <div class="card">
+          <h3>PyKirk</h3>
+          <p>Python dispatcher that drives a scheduled state plan through a local agent and oracle.</p>
+        </div>
+      </a>
+      <a class="card-link" href="https://github.com/jolkin/pddl_to_sp" target="_blank" rel="noopener">
+        <div class="card">
+          <h3>pddl_to_sp</h3>
+          <p>Converts a PDDL domain, problem, and temporal plan into the state-plan JSON the planner expects.</p>
+        </div>
+      </a>
+      <a class="card-link" href="https://github.com/jolkin/robust-execution" target="_blank" rel="noopener">
+        <div class="card">
+          <h3>Robust Execution</h3>
+          <p>Causal-link monitor that tracks link integrity during dispatch and raises violations in real time.</p>
+        </div>
+      </a>
+    </div>
+
+    <h2>Where to start?</h2>
+    <p>
+      The <a href="tutorials.html">Tutorials</a> page walks through installation and running the
+      bundled drone PDDL example. For the full surface — every endpoint, every scenario, every
+      environment variable — head to the <a href="documentation.html">Documentation</a>.
+    </p>
+  </main>
+</div>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div>Janeway is part of the <a href="https://github.com/jolkin" target="_blank" rel="noopener">MIT MERS group</a> tooling.</div>
+    <div><a href="https://github.com/jolkin/janeway" target="_blank" rel="noopener">Source on GitHub</a></div>
+  </div>
+</footer>
+
+</body>
+</html>
