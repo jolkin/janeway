@@ -30,6 +30,7 @@ from .state_plan_dto import (
     StatePlanDTO,
     TemporalConstraintExpressionDTO,
     StateConstraintExpressionDTO,
+    NegatedStateConstraintExpressionDTO,
     ExecutionDTO,
 )
 
@@ -78,12 +79,17 @@ def _extract_causal_link_label(annotation) -> str:
     cl = annotation.causalLink
     if cl is False or cl is True:
         return ""
+    # A negated requirement wraps the equality; render it with "!=".
+    operator = "="
+    if isinstance(cl, NegatedStateConstraintExpressionDTO):
+        cl = cl.x
+        operator = "!="
     # cl is a StateConstraintExpressionDTO
     left = cl.left
     right = cl.right
     if isinstance(left, dict):
         left = left.get("stateVar", str(left))
-    return f"{left} = {right}"
+    return f"{left} {operator} {right}"
 
 
 def _normalize_time(raw_time: float) -> float:

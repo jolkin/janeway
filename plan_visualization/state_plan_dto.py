@@ -55,10 +55,23 @@ class StateConstraintExpressionDTO(BaseModel):
     right: str | bool | list
 
 
+class NegatedStateConstraintExpressionDTO(BaseModel):
+    """A negated state constraint, e.g. the `glider.location != site` preconditions.
+
+    Kirk emits these as `{"$type": "notApplication", "x": {...equalApplication...}}`,
+    with the single operand under `x` rather than `left`/`right`.
+    """
+
+    type: str = Field(validation_alias="$type")
+    x: StateConstraintExpressionDTO
+
+
 class AnnotationDTO(BaseModel):
     """Constraint annotations"""
 
-    causalLink: Union[bool, StateConstraintExpressionDTO] = Field(default=False)
+    causalLink: Union[
+        bool, NegatedStateConstraintExpressionDTO, StateConstraintExpressionDTO
+    ] = Field(default=False)
 
 
 class ConstraintDTO(BaseModel):
