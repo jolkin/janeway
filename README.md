@@ -194,7 +194,7 @@ Open `http://localhost:9004` in a browser after dispatching a plan.
 
 ### Causal link monitoring
 
-The causal link monitor (port `9003`) is initialized automatically when a plan is dispatched. During execution, the oracle posts state updates to the monitor as causal link events fire. The monitor checks these updates against the expected causal link conditions from the plan.
+The causal link monitor (port `9003`) is initialized automatically when a plan is dispatched. During execution, the oracle posts state updates to the monitor as causal link events fire. The monitor checks these updates against the expected causal link conditions from the plan. When the oracle is off, whatever is executing the plan reports state through [`POST /state-update`](#post-state-update) (or the ROS 2 bridge).
 
 When a causal link violation is detected, the monitor reports it in real time via the `GET /violations` SSE (Server-Sent Events) stream on the main API. Connect to this endpoint to receive violation alerts as they occur:
 
@@ -339,6 +339,7 @@ The two manual fault buttons in the bottom-right of the visualization remain ava
 | `MAGELLAN_PORT`     | `5000`  | Internal port for Magellan (when `ENABLE_MAGELLAN=1`) |
 | `MPCSCOTTY_DIR`     | `/app/MPCScotty` | Path to the MPCScotty source tree |
 | `MAGELLAN_PROBLEMS_DIR` | `${MPCSCOTTY_DIR}/problems` | Where uploaded YAML model files are written |
+| `MISSION_STATUS_CALLBACK_URL` | _(empty)_ | URL that receives a POST of the dispatcher's terminal status payload (`{"status": "completed"\|"fail", ...}`) when a mission ends. The same payload is always broadcast on `GET /violations`. |
 | `SIMULATE_FAULTS`   | `0`     | Set to `1` to have the oracle inject causal link violations |
 | `FAULT_SPEC_FILE`   | _(empty)_ | Path (inside the container) to a YAML/JSON file describing per-action fault injections. See the [Fault simulation](#fault-simulation) section for the file format. |
 | `ENABLE_REPLANNING` | `1`     | Set to `0` to halt the mission on a violation instead of replanning online (see [Online replanning](#online-replanning)) |
@@ -471,6 +472,7 @@ curl -X POST http://localhost:8000/execute-state-plan \
 **Processing steps:**
 1. The state plan JSON is saved to `generated_plans/<timestamp>_state_plan_input.json`.
 2. The JSON is sent to Kirk's `POST /plan-from-state-plan` endpoint, which runs the planner and returns a new scheduled state plan.
+3. The scheduled state plan is dispatched to PyKirk via `POST /plans`.
 
 #### Uncertain durations, chance constraints, choices and negation
 
@@ -516,12 +518,11 @@ An **open choice** is an integer variable with a range, guarding constraints thr
          "right": "site-a" } }
 ```
 
-Note that causal-link extraction only recognises equality and implication when deriving preconditions, so a negated precondition decodes and reaches the planner but does not by itself produce a causal link.
+A negated precondition produces a causal link with an inverted relation: it is supported by any producer that sets the variable to a different value and threatened by one that sets it to `site-a`. The monitor verifies it as `rover1.location != site-a`.
 
 Arithmetic uses word-named types, `plusApplication`, `minusApplication` and `timesApplication`, each taking `numbers` except `minus` which takes `number` plus `moreNumbers`. Plans generated before these names existed encode all three as a bare `"Application"` that names no operator; those are rejected with an explanatory error rather than being guessed at, and need regenerating.
 
 Many other odo operators can still be written by the encoder but not read back by the decoder. If you hit one, the error names the type it could not match.
-3. The scheduled state plan is dispatched to PyKirk via `POST /plans`.
 
 ### `POST /resume`
 
@@ -557,6 +558,21 @@ curl http://localhost:8000/state
 # {"assignments": {"rover1.location": {"variable": "rover1.location", "value": "science1"},
 #                  "rover1.has_sample": {"variable": "rover1.has_sample", "value": true}}}
 ```
+
+### `POST /state-update`
+
+Reports observed world state to the causal link monitor. This is the hook an external executive (a robot, a simulator, your own oracle) uses to tell Janeway what it sees. The body is a flat JSON object mapping state variables to observed values, which may be strings, numbers or booleans. Variable names use Kirk's `<object>.<attribute>` form and are case-insensitive.
+
+```bash
+curl -X POST http://localhost:8000/state-update \
+     -H "Content-Type: application/json" \
+     -d '{"rover1.location": "science1", "rover1.has_sample": true}'
+# {"status": "State update received", "success": true, "conflicts": []}
+```
+
+The monitor records the values (they show up in `GET /state`) and checks them against every active causal link. A value that contradicts an active link is a violation. It is returned in `conflicts`, broadcast on `GET /violations` with `"source": "state-update"`, and triggers an online replan (or a halt when `ENABLE_REPLANNING=0`). Reporting a value no active link depends on is not a violation: it is recorded and checked against links that become active later.
+
+Report state alongside execution reports: post an action's effects when its `*_end` event executes, so that the links it produces are verified against what actually happened. The local oracle, the ROS 2 bridge (`/eaas/state_updates`) and the drone visualization all send this same payload. They post it straight to the monitor's `POST /observe-state-update` on port `9003`, which also works for external clients when that port is published.
 
 ### `GET /health`
 
@@ -603,7 +619,7 @@ The [ros_bridge/](ros_bridge/) package is a standalone ROS 2 node that runs **ou
 
 **Outbound** (container → ROS): the node connects to the telemetry WebSocket inside the container and publishes every dispatch event on the `/eaas/events` ROS topic as a `std_msgs/String` containing JSON.
 
-**Inbound** (ROS → container): the node subscribes to `/eaas/execution_reports`. When a message arrives it is forwarded as an HTTP POST to the dispatcher's `/executions` endpoint so the dispatch cycle can advance based on real-world acknowledgements instead of the simulated oracle.
+**Inbound** (ROS → container): the node subscribes to `/eaas/execution_reports`. When a message arrives it is forwarded as an HTTP POST to the dispatcher's `/executions` endpoint so the dispatch cycle can advance based on real-world acknowledgements instead of the simulated oracle. It also subscribes to `/eaas/state_updates` and forwards observed state to the causal link monitor.
 
 ### Installation
 
@@ -659,6 +675,16 @@ Publish a `std_msgs/String` to `/eaas/execution_reports` with a JSON body:
 ```
 
 The bridge wraps this flat ROS message into a `ReportExecutionPayloadDTO` (`{"executions": [ ... ]}`) and POSTs it to the dispatcher's `POST /executions`.
+
+### Sending state updates from ROS
+
+Publish a `std_msgs/String` to `/eaas/state_updates` whose body is the same flat JSON object accepted by [`POST /state-update`](#post-state-update):
+
+```json
+{"rover1.location": "science1", "rover1.has_sample": true}
+```
+
+The bridge forwards it to the monitor's `POST /observe-state-update`.
 
 ### Listening for dispatch events
 

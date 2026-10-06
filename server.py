@@ -57,6 +57,10 @@ ENABLE_VIS = os.environ.get("ENABLE_VIS", "0").strip() not in ("0", "", "false",
 ENABLE_MAGELLAN = os.environ.get("ENABLE_MAGELLAN", "0").strip() not in ("0", "", "false", "False")
 SIMULATE_FAULTS = os.environ.get("SIMULATE_FAULTS", "0")
 FAULT_SPEC_FILE = os.environ.get("FAULT_SPEC_FILE", "")
+# Optional external URL told when a mission terminates.  The dispatcher itself
+# always reports to our /violations (so the SSE stream sees it); that handler
+# forwards {"status": "completed"|"fail"} here.
+MISSION_STATUS_CALLBACK_URL = os.environ.get("MISSION_STATUS_CALLBACK_URL", "").strip()
 # Online replanning: on a causal-link violation or a temporal inconsistency,
 # pause the dispatcher, ask Kirk to re-solve the mission's TPN around what has
 # already executed, and resume from the new plan.  When disabled, violations
@@ -571,6 +575,20 @@ async def _broadcast(payload: dict) -> None:
     """Fan a payload out to every /violations SSE subscriber."""
     for queue in list(_violation_subscribers):
         await queue.put(payload)
+
+
+async def _notify_mission_status(payload: dict) -> None:
+    """POST a terminal mission status to MISSION_STATUS_CALLBACK_URL, if set."""
+    if not MISSION_STATUS_CALLBACK_URL:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(MISSION_STATUS_CALLBACK_URL, json=payload)
+        log.info("Mission status forwarded to %s (status=%s)",
+                 MISSION_STATUS_CALLBACK_URL, resp.status_code)
+    except httpx.RequestError as exc:
+        log.warning("Could not reach MISSION_STATUS_CALLBACK_URL %s: %s",
+                    MISSION_STATUS_CALLBACK_URL, exc)
 
 
 async def _pause_dispatcher(reason: str) -> bool:
@@ -1297,6 +1315,46 @@ async def get_state():
     return state
 
 
+@app.post("/state-update")
+async def post_state_update(request: Request):
+    """Report observed world state to the causal link monitor.
+
+    The body is a flat JSON object mapping state variables to their observed
+    values, e.g. ``{"rover1.location": "science1", "rover1.has_sample": true}``
+    (variable names are case-insensitive).  This is the same payload the
+    local oracle and the ROS bridge send to the monitor's
+    ``/observe-state-update``; exposing it here lets an external executive
+    report state through the main API port alone.
+
+    A value that contradicts an active causal link is a violation: it is
+    broadcast on ``GET /violations`` and triggers a replan (or a halt when
+    replanning is disabled), exactly as for oracle-reported state.  The
+    response is the monitor's: ``success`` and the list of ``conflicts``.
+    """
+    try:
+        update = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Body must be JSON")
+    if not isinstance(update, dict) or not update:
+        raise HTTPException(status_code=400,
+                            detail="Body must be a non-empty JSON object of variable: value")
+    bad = [k for k, v in update.items() if not isinstance(v, (str, bool, int, float))]
+    if bad:
+        raise HTTPException(status_code=400,
+                            detail=f"Values must be strings, numbers or booleans: {bad}")
+    log.info("State update via /state-update: %s", update)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"http://127.0.0.1:{MONITOR_PORT}/observe-state-update", json=update,
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"Monitor unreachable: {exc}")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    return resp.json()
+
+
 @app.get("/health")
 async def health():
     """Check liveness of this server and its downstream services."""
@@ -1350,6 +1408,7 @@ async def receive_violation(request: Request):
         else:
             log.warning("Mission failed: %s", payload)
         await _broadcast(payload)
+        await _notify_mission_status(payload)
         return {"status": "received", "kind": "mission-status"}
 
     if status == "replan-requested":
