@@ -18,5 +18,5 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 curl --fail-with-body -X POST "${EAAS_URL}/execute-pddl" \
      -F "domain=@${HERE}/drone_domain.pddl" \
      -F "problem=@${HERE}/drone_problem_multi.pddl" \
-     -F "plan_file=@${HERE}/drone_plan_multi_difficult.txt"
+     -F "plan_file=@${HERE}/drone_plan_multi.txt"
 echo

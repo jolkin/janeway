@@ -78,8 +78,20 @@ cd janeway</code></pre>
     <!-- ─── BUILD ─── -->
     <h2 id="build" class="anchor-h">3. Build and start the container <a class="perma" href="#build">¶</a></h2>
 
-    <p>From the repository root:</p>
-    <pre><code>docker compose up</code></pre>
+    <p>
+      From the repository root. For this walkthrough we want the in-container simulated oracle
+      to drive the dispatch loop (no browser required), which is opt-in:
+    </p>
+    <pre><code>ENABLE_ORACLE=1 docker compose up</code></pre>
+
+    <div class="callout info">
+      <span class="callout-title">Why the flag?</span>
+      Janeway accepts plans by default but does not execute them &mdash; some other component
+      has to post execution reports back to the dispatcher. <code>ENABLE_ORACLE=1</code> turns on
+      the in-container simulated oracle, which is the simplest way to run the bundled example
+      end-to-end. For the browser-visualization variant later in this tutorial we'll use
+      <code>ENABLE_VIS=1</code> instead, which lets the drone scene act as the oracle.
+    </div>
 
     <p>
       The first invocation builds the image, which takes <strong>5–10 minutes</strong> — it
@@ -173,8 +185,9 @@ cd janeway</code></pre>
 
     <ul>
       <li>
-        Try the same example with the <strong>drone visualization scene</strong> by adding
-        <code>ENABLE_VIS=1</code>:
+        Try the same example with the <strong>drone visualization scene</strong>. In this mode
+        the in-browser drone scene is itself the execution oracle, so leave
+        <code>ENABLE_ORACLE</code> off:
         <pre><code>ENABLE_VIS=1 docker compose up</code></pre>
         Then open <a href="http://localhost:5173">http://localhost:5173</a>.
       </li>

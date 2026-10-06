@@ -283,7 +283,7 @@ If you'd rather have the browser connect to the telemetry server directly (e.g. 
 
 ### External execution (no oracle)
 
-By default the container runs a local oracle that simulates execution acknowledgements. When integrating with a real robot system (e.g. via the ROS 2 bridge), disable the oracle so that execution reports come from outside the container:
+`docker run` starts a local oracle that simulates execution acknowledgements (`docker compose up` does not; see [Environment variables](#environment-variables)). When integrating with a real robot system (e.g. via the ROS 2 bridge), disable the oracle so that execution reports come from outside the container:
 
 ```bash
 docker run --rm \
@@ -307,13 +307,13 @@ When `ENABLE_VIS=1` is paired with `ENABLE_MAGELLAN=0` and the active scene in `
 1. POSTs an execution report for the corresponding `*_end` event to the dispatcher (via Vite's `/dispatcher` proxy), so the dispatch cycle advances based on what the user actually sees rather than the planner's nominal timing.
 2. POSTs the action's effect to the causal-link monitor (via the `/monitor` proxy), so monitor state and visualization state stay aligned.
 
-This lets you run the drone scenario with `ENABLE_ORACLE=0` and still get a fully advancing mission — no separate oracle process, no ROS bridge required. The mappings are:
+This lets you run the drone scenario with `ENABLE_ORACLE=0` and still get a fully advancing mission — no separate oracle process, no ROS bridge required. Under `docker compose` the oracle is already off, so `ENABLE_VIS=1 docker compose up` is all you need. Pick the scene with `VIS_DRONE_PRESET` (`single` for `examples/pddl/run.sh`, `multi` for `examples/pddl/run_multi.sh`). The mappings are:
 
 | Verb     | Monitor state update                                                                        |
 |----------|---------------------------------------------------------------------------------------------|
-| `fly`    | `DRONE1.DRONE-AT = <"to" arg>`                                                              |
-| `scoop`  | `DRONE1.HAS-WATER = true`,  `DRONE1.TANK-EMPTY = false`                                     |
-| `deliver`| `DRONE1.HAS-WATER = false`, `DRONE1.TANK-EMPTY = true`, `HOUSEN.FIRE = false`, `HOUSEN.EXTINGUISHED = true` |
+| `fly`    | `<DRONE>.DRONE-AT = <"to" arg>`                                                             |
+| `scoop`  | `<DRONE>.HAS-WATER = true`,  `<DRONE>.TANK-EMPTY = false`                                   |
+| `deliver`| `<DRONE>.HAS-WATER = false`, `<DRONE>.TANK-EMPTY = true`, `HOUSEN.FIRE = false`, `HOUSEN.EXTINGUISHED = true` |
 
 The two manual fault buttons in the bottom-right of the visualization remain available and post separately to the monitor.
 
@@ -333,7 +333,7 @@ The two manual fault buttons in the bottom-right of the visualization remain ava
 | `MONITOR_PORT`      | `9003`  | Internal port for the causal link monitor |
 | `PLAN_VIS_PORT`     | `9004`  | Port for the plan visualization server |
 | `SERVER_PORT`       | `8000`  | External port for the HTTP API      |
-| `ENABLE_ORACLE`     | `1`     | Set to `0` to disable the local oracle and expose the dispatcher for external execution reports |
+| `ENABLE_ORACLE`     | `1` (`docker run`), `0` (`docker compose`) | `1` runs the in-container simulated oracle, which drives the dispatch loop on its own. `0` leaves execution reports to an outside source (the browser visualization, the ROS 2 bridge, or any HTTP client). Don't enable both the oracle and the drone visualization: two sources of execution reports would race into the dispatcher. |
 | `ENABLE_VIS`        | `0`     | Set to `1` to enable PyKirk visualization |
 | `ENABLE_MAGELLAN`   | `0`     | Set to `1` to start Magellan/MPCScotty and route plans there instead of PyKirk |
 | `MAGELLAN_PORT`     | `5000`  | Internal port for Magellan (when `ENABLE_MAGELLAN=1`) |
@@ -348,6 +348,7 @@ The two manual fault buttons in the bottom-right of the visualization remain ava
 | `TELEMETRY_PORT`    | `8002`  | Port for the PyKirk telemetry server (vis only) |
 | `VIS_PORT`          | `5173`  | Port for the Vite visualization frontend (vis only) |
 | `VIS_WS_URL`        | `ws://localhost:8002/ws` | WebSocket URL the **browser** uses to reach the telemetry server. Must be publicly reachable. |
+| `VIS_DRONE_PRESET`  | _(empty)_; `single` under `docker compose` | Drone-scene preset: `single` (1 drone, 2 houses — matches `examples/pddl/drone_problem.pddl`) or `multi` (2 drones, 3 houses — matches `examples/pddl/drone_problem_multi.pddl`). Empty uses the `preset` field of `pykirk/visualization/src/config/scene-config.json` (currently `multi`). Requires `ENABLE_VIS=1`. |
 
 ## Online replanning
 
