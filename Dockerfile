@@ -6,18 +6,13 @@
 # required Quicklisp packages, then invoke (asdf:make :kirk-v2) to produce the
 # self-contained "deploy-op" executable bundle at enterprise/kirk-v2/build/kirk.
 # ═══════════════════════════════════════════════════════════════════════════════
-FROM clfoundation/sbcl:2.2.4 AS kirk-builder
+FROM clfoundation/sbcl:2.6.9-bookworm AS kirk-builder
 
 # System packages needed at build time.
-# The bullseye base image's default mirrors are archived; point apt at
-# archive.debian.org (its original bullseye Release is signed by a key already
-# in the base keyring; the Release file is expired, so disable the
-# valid-until check).
 # coinor-libipopt-dev provides libipopt for the :ipopt feature build below
 # (num-opt's IPOPT backend, needed by pSTN chance-constraint risk allocation);
 # build-essential + pkg-config are needed by ipopt-cffi's cffi-grovel step.
-RUN printf 'deb http://archive.debian.org/debian bullseye main\n' > /etc/apt/sources.list \
-    && apt-get -o Acquire::Check-Valid-Until=false update \
+RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
@@ -170,7 +165,7 @@ COPY --from=kirk-builder /common-lisp/enterprise/build/ /app/kirk/
 
 # ── IPOPT numeric stack for kirk (see the runtime-packages note above) ───────
 # server.py launches kirk with LD_LIBRARY_PATH pointing here, so only the kirk
-# process resolves these bullseye libraries; everything else uses the OS stack.
+# process resolves these bookworm libraries; everything else uses the OS stack.
 COPY --from=kirk-builder /ipopt-runtime/ /app/kirk/ipopt-libs/
 
 # ── Install the wrapper server's own dependencies ─────────────────────────────
